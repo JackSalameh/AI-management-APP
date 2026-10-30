@@ -1,0 +1,51 @@
+# Context — Codex Projects Management
+
+Durable facts, decisions and progress. Keep concise; update as the project evolves.
+
+## Ownership
+- Author and copyright holder: **Jack Salameh** (jacksalameh@live.com). Not affiliated with, or branded for, any employer.
+- Licence: all rights reserved for now (keeps every publishing option open). Choose an open-source or commercial licence before first public release.
+- Product name is a single constant (`lib/brand.mjs`, `public/brand.js`). "Codex" is an OpenAI trademark: confirm naming rights before publishing under this name.
+
+## Origin
+- A first version (1.0–1.8.3) was built in a Codex CLI session on 29–30 Oct 2026 (rollout `01a1867c-9ded-7832-bb88-912fe27a45cb`). Its source code was not carried over; this repository is a clean rebuild from that transcript, started 30 Oct 2026.
+
+## Purpose
+A local desktop web app that replaces the Codex command window: projects as an Explorer-style folder tree, conversations under their folder, chat with streamed agent work and approvals, model/effort control, per-folder and per-conversation memory (CONTEXT.md / INSTRUCTIONS.md), and developer tools (VS Code, MATLAB, Git, Bitbucket, Jira). Long-term: an all-in-one multi-agent workbench (Codex, Claude Code, Gemini…), possibly with a mobile companion.
+
+## Architecture (decided)
+- Node.js ≥ 22, **zero runtime npm dependencies**; `node server.mjs` serves `public/` on 127.0.0.1 with a random per-launch token.
+- Agents are adapters (`lib/agents/`). Codex uses the official **`codex app-server`** JSON-RPC over stdio (methods verified against codex-cli 0.166.0 `generate-ts`). Claude Code adapter uses `claude -p --output-format stream-json`.
+- App state is per OS user: Windows `%APPDATA%\CodexProjectsManagement`, macOS `~/Library/Application Support/CodexProjectsManagement`, Linux `$XDG_CONFIG_HOME/codex-projects-management`. Override with `CPM_DATA_DIR`.
+- Codex home: `CODEX_HOME` or `~/.codex`. Each OS user sees only their own Codex account and conversations.
+- Folder memory: `<folder>/.cpm/CONTEXT.md|INSTRUCTIONS.md`; conversation memory: `<folder>/.cpm/conversations/<threadId>/`. If the folder is not writable, memory falls back to the app data dir and sending is never blocked.
+
+## Verified protocol facts (codex-cli 0.166.0)
+- Threads: `thread/start|resume|list|read|archive|unarchive|delete|name/set`; turns: `turn/start|interrupt`; config: `config/read|value/write|batchWrite`; `model/list` returns per-model `supportedReasoningEfforts`.
+- Supported efforts differ per model (e.g. `ultra` on gpt-6.1-sol, not on gpt-5.5 / gpt-6-luna). `config/value/write` accepts any string, so effort must be validated by the app against `model/list`.
+- A new thread has no rollout file until its first message; the app must keep its own record so it stays visible.
+- MCP entries `[mcp_servers.<name>]` accept `enabled = false`; remote servers use `url` + `bearer_token_env_var`; stdio servers use `command`, `args`, `env`.
+- Approval server requests: `item/commandExecution/requestApproval` (accept / acceptForSession / decline / cancel) and `item/fileChange/requestApproval`.
+
+## Bugs from v1 that the rebuild must not repeat
+1. `\\?\D:\…` and `D:\…` treated as different folders → normalise paths.
+2. Empty conversations disappear after refresh → app-side record.
+3. Changing effort then clicking Send immediately lost the change → Send awaits pending config writes.
+4. MATLAB `-r` command lost its quotes (`version(-release)`) → run a generated startup `.m` file.
+5. `(item.changes || []).map is not a function` → accept array or object.
+6. "Thread already has an active writer" → explain: close the other Codex window, then retry.
+7. Quit killed the server so Reconnect failed → Quit stops only the agent process.
+8. `EPERM mkdir D:\` → never create existing drive roots; memory-write failures never block Send.
+9. Injected context displayed as the user's message → collapsed "shared context" block.
+10. "Ultra" offered for models that do not support it → efforts from `model/list`.
+11. Windows `.cmd` shims cannot be spawned without a shell (Node ≥ 20) → resolve the real entry point.
+
+## Decisions added in 2.0
+- Memory is opt-in: new conversations open a setup window (title, context, instructions); existing conversations without files are asked once; "No" is remembered and creates nothing. Folder memory is created only when the user opens/edits it.
+- Drafts live server-side in state.json (browser storage is per-origin and the port used to change).
+- Default port is stable per OS user (47100–47899, derived from user@host); falls back to a free port.
+- History is read with `thread/turns/list` (paged); `thread/read includeTurns` fails on 0.166 for empty threads.
+- Claude Code sessions are listed from ~/.claude/projects; one `claude -p` process per message.
+
+## Progress
+- 2026-10-30: rebuild completed as 2.0.0 in a cloud workspace (not deployed). Validation: 40 automated tests, 23 browser flows, smoke test against real codex-cli 0.166.0 (no account), Claude adapter read of a real session. Not verified: Windows-only paths (DPAPI, .vbs, Edge app window, MATLAB launch), real Jira/Bitbucket accounts, paid model replies. See CHANGELOG.md.

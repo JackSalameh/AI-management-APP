@@ -1,0 +1,1371 @@
+// Codex Projects Management — client. © 2026 Jack Salameh. All rights reserved.
+import { icon, toolIcon, setLogos, FLAGS } from './icons.js';
+import { t, setLang, getLang, LANGS } from './i18n.js';
+import { renderMarkdown, esc, diffHtml, highlightCode } from './markdown.js';
+
+// ------------------------------------------------------------------ bootstrap & API
+const TOKEN = (() => {
+  const m = /[#&]t=([\w-]+)/.exec(location.hash);
+  try {
+    if (m) { sessionStorage.setItem('cpm.token', m[1]); history.replaceState(null, '', location.pathname); return m[1]; }
+    return sessionStorage.getItem('cpm.token') || '';
+  } catch { return m ? m[1] : ''; }
+})();
+
+class ApiError extends Error { constructor(msg, code, status) { super(msg); this.code = code; this.status = status; } }
+async function api(path, body) {
+  let r;
+  try {
+    r = await fetch(path, { method: body === undefined ? 'GET' : 'POST', headers: { 'x-cpm-token': TOKEN, ...(body !== undefined ? { 'content-type': 'application/json' } : {}) }, body: body === undefined ? undefined : JSON.stringify(body) });
+  } catch { throw new ApiError(t('disconnected'), 'NETWORK', 0); }
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new ApiError(j.error || `HTTP ${r.status}`, j.code, r.status);
+  return j;
+}
+const q = (p) => '?' + new URLSearchParams(p).toString();
+
+const store = {
+  get(k, d) { try { const v = localStorage.getItem('cpm.' + k); return v == null ? d : JSON.parse(v); } catch { return d; } },
+  set(k, v) { try { localStorage.setItem('cpm.' + k, JSON.stringify(v)); } catch { /* storage unavailable */ } },
+};
+
+// ------------------------------------------------------------------ state
+const S = {
+  sum: null,              // /api/state
+  conv: null,             // open conversation { key, record, items, running, pending, memory }
+  itemIdx: new Map(),
+  compose: { modelKey: null, effort: null, mode: null },
+  search: '', showArchived: false, showTrash: false,
+  selFolder: null,
+  git: { st: null, out: '', sel: new Set(), busy: false, msg: '' },
+  banner: null,
+  sending: false,
+  conn: 'ok',             // 'ok' | 'lost' — browser ↔ app server (rec. 1)
+  phase: {},              // key -> queued | running | approval | completed | failed | interrupted (rec. 6)
+  ack: {},                // key -> { model, effort, provider } acknowledged by Codex
+  usage: {},              // key -> token usage
+  treeSig: '',
+  turnsDone: {},          // key -> count of completed turns (guards the Send/complete race)
+};
+const convByKey = () => new Map((S.sum?.conversations || []).map((c) => [c.key, c]));
+const pk = (p) => (/^[A-Za-z]:|^\\\\/.test(p || '') ? String(p).toLowerCase() : String(p || ''));
+const settings = () => S.sum?.settings || {};
+let saveSettingsTimer;
+function patchSettings(patch, now = false) {
+  Object.assign(S.sum.settings, patch);
+  clearTimeout(saveSettingsTimer);
+  const go = () => api('/api/settings', patch).catch(() => {});
+  if (now) go(); else saveSettingsTimer = setTimeout(go, 300);
+}
+
+// ------------------------------------------------------------------ DOM helpers
+// replaceChildren/append turn null into the text "null"; conditional children are common here, so drop them.
+for (const m of ['replaceChildren', 'append', 'prepend']) {
+  const orig = Element.prototype[m];
+  Element.prototype[m] = function (...kids) { return orig.apply(this, kids.flat().filter((k) => k != null && k !== false)); };
+}
+function h(tag, attrs = {}, ...kids) {
+  const el = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs || {})) {
+    if (v == null || v === false) continue;
+    if (k === 'class') el.className = v;
+    else if (k === 'html') el.innerHTML = v;
+    else if (k.startsWith('on')) el.addEventListener(k.slice(2), v);
+    else if (k === 'style' && typeof v === 'object') Object.assign(el.style, v);
+    else el.setAttribute(k, v === true ? '' : v);
+  }
+  for (const c of kids.flat(Infinity)) if (c != null && c !== false) el.append(c instanceof Node ? c : document.createTextNode(String(c)));
+  return el;
+}
+const ib = (name, tip, onclick, extra = {}) => h('button', { class: `ibtn ${extra.class || ''}`, 'data-tip': tip, 'aria-label': tip, onclick, html: icon(name), type: 'button', ...(extra.attrs || {}) });
+function toast(msg, err = false, ms = 4200) {
+  const el = h('div', { class: `toast ${err ? 'err' : ''}` }, msg);
+  document.getElementById('toasts').append(el);
+  setTimeout(() => el.remove(), err ? ms * 1.6 : ms);
+}
+const fail = (e) => toast(e.message || String(e), true);
+async function copyText(s) { try { await navigator.clipboard.writeText(s); toast(t('copied')); } catch { prompt('', s); } }
+const fmtTime = (ms) => { if (!ms) return ''; const d = new Date(ms); const now = new Date(); return d.toDateString() === now.toDateString() ? d.toLocaleTimeString(getLang(), { hour: '2-digit', minute: '2-digit' }) : d.toLocaleDateString(getLang(), { day: 'numeric', month: 'short' }); };
+const effortLabel = (e) => { const k = `effort.${e}`; const s = t(k); return s === k ? e : s; };
+
+// ------------------------------------------------------------------ menus & dialogs
+let openMenuEl = null;
+function closeMenu() { openMenuEl?.remove(); openMenuEl = null; }
+function showMenu(anchor, items) {
+  closeMenu();
+  const m = h('div', { class: 'menu', role: 'menu' });
+  for (const it of items) {
+    if (it === '-') { m.append(h('hr')); continue; }
+    if (!it || it.hidden) continue;
+    m.append(h('button', { class: `${it.danger ? 'danger' : ''} ${it.cls || ''}`, onclick: () => { closeMenu(); it.run(); }, html: (it.html || icon(it.icon || 'chevron')) + `<span>${esc(it.label)}</span>` }));
+  }
+  document.body.append(m);
+  const r = anchor.getBoundingClientRect ? anchor.getBoundingClientRect() : { left: anchor.x, bottom: anchor.y, top: anchor.y, right: anchor.x };
+  const w = m.offsetWidth, hh = m.offsetHeight;
+  m.style.left = Math.max(6, Math.min(r.left, innerWidth - w - 6)) + 'px';
+  m.style.top = (r.bottom + hh + 6 > innerHeight ? Math.max(6, r.top - hh - 4) : r.bottom + 4) + 'px';
+  openMenuEl = m;
+}
+document.addEventListener('mousedown', (e) => { if (openMenuEl && !openMenuEl.contains(e.target)) closeMenu(); });
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') { closeMenu(); [...document.querySelectorAll('.overlay')].pop()?.__close?.(); } });
+
+/** Modal that closes on outside click and Escape (requirement). */
+function modal({ title, body, foot, cls = '', onClose }) {
+  const ov = h('div', { class: 'overlay' });
+  const close = () => { ov.remove(); onClose?.(); };
+  ov.__close = close;
+  const dlg = h('div', { class: `dialog ${cls}`, role: 'dialog', 'aria-modal': 'true' },
+    h('div', { class: 'dlg-head' }, h('h2', {}, title), ib('close', t('close'), close)),
+    h('div', { class: 'dlg-body' }, body),
+    foot ? h('div', { class: 'dlg-foot' }, foot) : null);
+  ov.addEventListener('mousedown', (e) => { if (e.target === ov) close(); });
+  ov.append(dlg); document.body.append(ov);
+  setTimeout(() => dlg.querySelector('input:not([type=checkbox]),textarea,select')?.focus(), 30);
+  return { close, dlg };
+}
+function ask({ title, label, value = '', okLabel = t('ok'), help, password = false, validate }) {
+  return new Promise((resolve) => {
+    let done = false;
+    const input = h('input', { type: password ? 'password' : 'text', value, class: 'input', autocomplete: 'off', spellcheck: 'false' });
+    const err = h('div', { class: 'help', style: { color: 'var(--danger)' } });
+    const ok = () => { const v = input.value.trim(); const e = validate?.(v); if (e) { err.textContent = e; return; } done = true; m.close(); resolve(v); };
+    input.addEventListener('keydown', (e) => { if (e.key === 'Enter') ok(); });
+    const m = modal({ title, body: h('div', {}, help ? h('p', { class: 'help' }, help) : null, h('label', { class: 'field' }, h('span', {}, label), input), err), foot: [h('button', { class: 'btn', onclick: () => m.close() }, t('cancel')), h('button', { class: 'btn primary', onclick: ok }, okLabel)], onClose: () => { if (!done) resolve(null); } });
+    setTimeout(() => { input.focus(); input.select(); }, 40);
+  });
+}
+function confirmBox({ title, text, okLabel = t('ok'), danger = false }) {
+  return new Promise((resolve) => {
+    let done = false;
+    const m = modal({ title, body: h('p', {}, text), foot: [h('button', { class: 'btn', onclick: () => m.close() }, t('cancel')), h('button', { class: `btn ${danger ? 'danger' : 'primary'}`, onclick: () => { done = true; m.close(); resolve(true); } }, okLabel)], onClose: () => { if (!done) resolve(false); } });
+  });
+}
+
+// ------------------------------------------------------------------ theme & language
+function applyTheme() {
+  const th = settings().theme || 'system';
+  const dark = th === 'dark' || (th === 'system' && matchMedia('(prefers-color-scheme: dark)').matches);
+  document.documentElement.dataset.theme = dark ? 'dark' : 'light';
+  store.set('theme', th); try { localStorage.setItem('cpm.theme', th); } catch { /* */ }
+}
+matchMedia('(prefers-color-scheme: dark)').addEventListener?.('change', applyTheme);
+
+// ------------------------------------------------------------------ shell
+const $ = {};
+function buildShell() {
+  const app = document.getElementById('app');
+  app.innerHTML = '';
+  $.top = h('header', { class: 'topbar' });
+  $.side = h('aside', { class: 'sidebar' });
+  $.main = h('main', { class: 'main' });
+  $.gitp = h('aside', { class: 'gitpanel hidden' });
+  $.body = h('div', { class: 'body' }, $.side, $.main, $.gitp);
+  app.append($.top, $.body);
+}
+
+async function renderTop() {
+  const sum = S.sum, cx = sum.agents.codex, tools = sum.tools;
+  const state = cx.state;
+  const pill = h('button', { class: 'agent-pill', style: { border: 0, cursor: 'pointer' }, 'data-tip': cx.error || `Codex ${cx.version || ''}`.trim(), onclick: (e) => showMenu(e.currentTarget, [
+    { label: t('reconnect'), icon: 'refresh', run: reconnect },
+    { label: t('quitAgent'), icon: 'stop', run: () => api('/api/agent/stop', { agent: 'codex' }).then(loadState).catch(fail) },
+    '-', { label: t('configuration'), icon: 'gear', run: () => openSettings('agents') },
+  ]) }, h('span', { class: `dot ${state}` }), `Codex · ${t(state) || state}`);
+  const toolBtn = async (id, label, onclick) => {
+    const on = tools[id]?.enabled;
+    const b = h('button', { class: `ibtn ${on ? '' : 'off'}`, 'data-tip': `${label}${on ? '' : ' — ' + t('enabled').toLowerCase() + ': ✕'}`, 'aria-label': label, html: await toolIcon(id), onclick: on ? onclick : () => openSettings('tools', id) });
+    return b;
+  };
+  const curFolder = () => S.conv?.record?.cwd || S.selFolder;
+  const needFolder = (fn) => () => { const f = curFolder(); if (!f) { toast(t('openFolder'), true); return; } fn(f); };
+  const buttons = await Promise.all([
+    toolBtn('vscode', 'VS Code', needFolder((f) => api('/api/tools/vscode', S.conv ? { key: S.conv.key } : { folder: f }).catch(fail))),
+    toolBtn('matlab', 'MATLAB', needFolder((f) => api('/api/tools/matlab', S.conv ? { key: S.conv.key } : { folder: f }).then((r) => toast(`MATLAB ${r.release}`)).catch(fail))),
+    toolBtn('git', t('gitPanel'), () => toggleGit()),
+    toolBtn('bitbucket', `Bitbucket — ${t('pr')}`, needFolder(() => gitPR())),
+    toolBtn('jira', 'Jira', jiraAction),
+  ]);
+  const lang = getLang();
+  $.top.replaceChildren(
+    h('div', { class: 'brand' }, h('div', { class: 'mark', html: icon('logo') }), h('span', {}, sum.brand.name)),
+    pill,
+    h('div', { class: 'spacer' }),
+    ...buttons,
+    h('div', { class: 'sep' }),
+    h('button', { class: 'langsel', 'data-tip': t('language'), onclick: (e) => showMenu(e.currentTarget, Object.entries(LANGS).map(([k, v]) => ({ label: v.name, html: FLAGS[k], cls: 'flagopt', run: () => changeLang(k) }))), html: FLAGS[lang] + `<span>${lang.toUpperCase()}</span>` }),
+    ib(document.documentElement.dataset.theme === 'dark' ? 'sun' : 'moon', t('theme'), () => { patchSettings({ theme: document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark' }, true); applyTheme(); renderTop(); }),
+    ib('gear', t('configuration'), () => openSettings()),
+    ib('power', t('shutdown'), async () => { if (await confirmBox({ title: t('shutdown'), text: t('shutdown') + '?', okLabel: t('shutdown'), danger: true })) { await api('/api/shutdown', {}).catch(() => {}); showClosed(); } }),
+  );
+}
+
+function changeLang(l) { setLang(l); patchSettings({ lang: l }, true); renderAll(); }
+
+// ------------------------------------------------------------------ explorer
+function isExpanded(p, depth) {
+  const ex = settings().expanded || {};
+  const k = pk(p);
+  if (k in ex) return !!ex[k];
+  const within = (p2) => { if (!p2) return false; const a = pk(p2); const sep = k.includes('\\') ? '\\' : '/'; return a === k || a.startsWith(k.endsWith(sep) ? k : k + sep); };
+  if (within(S.conv?.record?.cwd) || within(S.selFolder)) return true;
+  return depth <= 1;
+}
+function setExpanded(p, v) { const ex = { ...(settings().expanded || {}) }; ex[pk(p)] = v; patchSettings({ expanded: ex }); }
+
+function renderSidebar() {
+  const convs = convByKey();
+  const head = h('div', { class: 'side-head' },
+    h('h2', {}, t('explorer')),
+    ib('chatPlus', t('newChat'), () => newConversation()),
+    ib('folderPlus', t('newFolder'), () => newFolder(S.selFolder || S.conv?.record?.cwd)),
+    ib('folderOpen', t('openFolder'), () => openFolderFlow()),
+    ib('refresh', t('refresh'), () => api('/api/refresh', {}).then((s) => { S.sum = s; renderSidebar(); }).catch(fail)),
+    ib('sidebar', t('hideFolders'), () => toggleSidebar(true)),
+  );
+  const search = h('input', { placeholder: t('search'), value: S.search, oninput: (e) => { S.search = e.target.value; renderTree(); } });
+  $.tree = h('div', { class: 'tree', role: 'tree' });
+  const foot = h('div', { class: 'side-foot' },
+    h('button', { class: `btn small ${S.showArchived ? 'primary' : ''}`, onclick: () => { S.showArchived = !S.showArchived; S.showTrash = false; renderSidebar(); }, html: icon('archive') + t('archived') }),
+    h('button', { class: `btn small ${S.showTrash ? 'primary' : ''}`, onclick: () => { S.showTrash = !S.showTrash; S.showArchived = false; renderSidebar(); }, html: icon('trash') + `${t('trash')}${S.sum.trash.length ? ` (${S.sum.trash.length})` : ''}` }),
+  );
+  $.side.replaceChildren(head, h('div', { class: 'side-search', html: icon('search') }, search), $.tree, foot);
+  renderTree(convs);
+}
+
+function renderTree(convs = convByKey()) {
+  const tree = $.tree; tree.replaceChildren();
+  if (S.showTrash) return renderTrash(tree);
+  if (S.showArchived) return renderArchived(tree, convs);
+  const term = S.search.trim().toLowerCase();
+  const matches = (key) => { const c = convs.get(key); return c && (!term || c.title.toLowerCase().includes(term) || (c.cwd || '').toLowerCase().includes(term)); };
+  const visible = (node) => !term || node.conversations.some(matches) || node.children.some(visible) || node.name.toLowerCase().includes(term);
+  const walk = (node, depth, parent) => {
+    if (!visible(node)) return;
+    const open = term ? true : isExpanded(node.path, depth);
+    const pad = 4 + depth * 14;
+    const row = h('div', { class: `row folder ${open ? 'open' : ''} ${S.selFolder && pk(S.selFolder) === pk(node.path) && !S.conv ? 'selected' : ''}`, role: 'treeitem', style: { paddingLeft: pad + 'px' }, title: node.path,
+      onclick: () => { S.selFolder = node.path; setExpanded(node.path, !open); renderTree(); },
+      oncontextmenu: (e) => { e.preventDefault(); folderMenu(e.target.closest('.row'), node); },
+      ondragover: (e) => { if (e.dataTransfer.types.includes('cpm/conv')) { e.preventDefault(); row.classList.add('drop'); } },
+      ondragleave: () => row.classList.remove('drop'),
+      ondrop: (e) => { row.classList.remove('drop'); const key = e.dataTransfer.getData('cpm/conv'); if (key) api('/api/conversation/move', { key, folder: node.path }).then(afterChange).catch(fail); } },
+    h('span', { class: 'twisty', html: icon('chevron') }),
+    h('span', { class: 'kind', html: icon(depth === 0 ? 'drive' : open ? 'folderOpen' : 'folder') }),
+    h('span', { class: 'label' }, node.name),
+    node.total ? h('span', { class: 'count' }, node.total) : null,
+    h('button', { class: 'ibtn rowbtn', 'data-tip': t('newChatHere'), html: icon('plus'), onclick: (e) => { e.stopPropagation(); newConversation(node.path); } }),
+    h('button', { class: 'ibtn rowbtn', 'data-tip': '⋯', html: icon('more'), onclick: (e) => { e.stopPropagation(); folderMenu(e.currentTarget, node); } }));
+    tree.append(row);
+    if (!open) return;
+    for (const child of node.children) walk(child, depth + 1, node);
+    for (const key of node.conversations) {
+      const c = convs.get(key);
+      if (!c || !matches(key)) continue;
+      const sel = S.conv?.key === key;
+      tree.append(h('div', { class: `row conv ${sel ? 'selected' : ''}`, role: 'treeitem', style: { paddingLeft: pad + 18 + 'px' }, draggable: 'true', title: `${c.title}\n${c.cwd}`,
+        ondragstart: (e) => e.dataTransfer.setData('cpm/conv', key),
+        onclick: () => openConversation(key),
+        oncontextmenu: (e) => { e.preventDefault(); convMenu(e.target.closest('.row'), c); } },
+      h('span', { class: 'kind', html: c.running ? '<span class="dot running" style="margin:0 4px"></span>' : icon(c.agent === 'claude' ? 'bot' : 'chat') }),
+      h('span', { class: 'label' }, c.title),
+      h('span', { class: 'count' }, fmtTime(c.updatedAt)),
+      h('button', { class: 'ibtn rowbtn', 'data-tip': '⋯', html: icon('more'), onclick: (e) => { e.stopPropagation(); convMenu(e.currentTarget, c); } })));
+    }
+    if (!node.conversations.length && !node.children.length && depth > 0) tree.append(h('div', { class: 'empty-note', style: { paddingLeft: pad + 36 + 'px' } }, t('emptyFolder')));
+    void parent;
+  };
+  for (const r of S.sum.tree) walk(r, 0, null);
+  if (!S.sum.tree.length) tree.append(h('div', { class: 'empty-note' }, t('noConversations')));
+}
+
+function renderArchived(tree, convs) {
+  const list = [...convs.values()].filter((c) => c.archived);
+  if (!list.length) { tree.append(h('div', { class: 'empty-note' }, '—')); return; }
+  for (const c of list) {
+    tree.append(h('div', { class: 'row conv', style: { paddingLeft: '8px' }, title: c.cwd, onclick: () => openConversation(c.key) },
+      h('span', { class: 'kind', html: icon('archive') }), h('span', { class: 'label' }, c.title),
+      h('button', { class: 'ibtn rowbtn show', 'data-tip': t('unarchive'), html: icon('restore'), onclick: (e) => { e.stopPropagation(); api('/api/conversation/unarchive', { key: c.key }).then(afterChange).catch(fail); } }),
+      h('button', { class: 'ibtn rowbtn show', 'data-tip': t('delete'), html: icon('trash'), onclick: (e) => { e.stopPropagation(); deleteConversation(c); } })));
+  }
+}
+
+function renderTrash(tree) {
+  if (!S.sum.trash.length) { tree.append(h('div', { class: 'empty-note' }, '—')); return; }
+  for (const it of S.sum.trash) {
+    const name = it.originalPath.split(/[\\/]/).filter(Boolean).pop();
+    tree.append(h('div', { class: 'row', style: { paddingLeft: '8px' }, title: it.originalPath },
+      h('span', { class: 'kind', html: icon('folder') }), h('span', { class: 'label' }, name),
+      h('button', { class: 'ibtn rowbtn show', 'data-tip': t('restore'), html: icon('restore'), onclick: () => api('/api/folder/restore', { id: it.id }).then(afterChange).catch(fail) }),
+      h('button', { class: 'ibtn rowbtn show', 'data-tip': t('erase'), html: icon('trash'), onclick: async () => {
+        const v = await ask({ title: t('erase'), label: t('name'), help: t('confirmErase', { name }), okLabel: t('erase') });
+        if (v != null) api('/api/folder/purge', { id: it.id, confirm: v }).then(afterChange).catch(fail);
+      } })));
+  }
+}
+
+function folderMenu(anchor, node) {
+  const isRoot = /^[A-Za-z]:\\?$/.test(node.path) || node.path === '/' || /^\\\\[^\\]+\\[^\\]+$/.test(node.path);
+  showMenu(anchor, [
+    { label: t('newChatHere'), icon: 'chatPlus', run: () => newConversation(node.path) },
+    { label: t('newFolderHere'), icon: 'folderPlus', run: () => newFolder(node.path) },
+    '-',
+    { label: t('folderContext'), icon: 'fileText', run: () => openFolderMemory(node.path, 'context') },
+    { label: t('folderInstructions'), icon: 'book', run: () => openFolderMemory(node.path, 'instructions') },
+    '-',
+    { label: t('renameOnDisk'), icon: 'edit', hidden: isRoot, run: () => renameFolder(node) },
+    { label: t('revealFolder'), icon: 'folderOpen', run: () => api('/api/reveal', { path: node.path }).catch(fail) },
+    { label: t('copyPath'), icon: 'copy', run: () => copyText(node.path) },
+    { label: t('forget'), icon: 'close', hidden: !node.pinned, run: () => api('/api/folder/forget', { path: node.path }).then(afterChange).catch(fail) },
+    '-',
+    { label: t('moveToTrash'), icon: 'trash', danger: true, hidden: isRoot, run: async () => { if (await confirmBox({ title: t('moveToTrash'), text: node.path, okLabel: t('moveToTrash'), danger: true })) api('/api/folder/trash', { path: node.path }).then(afterChange).catch(fail); } },
+  ]);
+}
+
+function convMenu(anchor, c) {
+  showMenu(anchor, [
+    { label: t('rename'), icon: 'edit', run: () => renameConversation(c) },
+    { label: t('moveTo'), icon: 'folder', run: async () => { const f = await pickFolder(c.cwd); if (f) api('/api/conversation/move', { key: c.key, folder: f }).then(afterChange).catch(fail); } },
+    { label: t('revealFolder'), icon: 'folderOpen', run: () => api('/api/reveal', { path: c.cwd }).catch(fail) },
+    '-',
+    { label: c.archived ? t('unarchive') : t('archive'), icon: 'archive', run: () => api(c.archived ? '/api/conversation/unarchive' : '/api/conversation/archive', { key: c.key }).then(afterChange).catch(fail) },
+    { label: t('delete'), icon: 'trash', danger: true, run: () => deleteConversation(c) },
+  ]);
+}
+
+async function deleteConversation(c) {
+  if (!await confirmBox({ title: t('delete'), text: `“${c.title}”`, okLabel: t('delete'), danger: true })) return;
+  try { await api('/api/conversation/delete', { key: c.key }); if (S.conv?.key === c.key) { S.conv = null; } await afterChange(); } catch (e) { fail(e); }
+}
+
+async function renameConversation(c) {
+  const v = await ask({ title: t('rename'), label: t('title'), value: c.title });
+  if (v) { await api('/api/conversation/rename', { key: c.key, title: v }).catch(fail); await afterChange(); }
+}
+
+async function renameFolder(node) {
+  const cur = node.path.split(/[\\/]/).filter(Boolean).pop();
+  const v = await ask({ title: t('renameOnDisk'), label: t('name'), value: cur });
+  if (!v || v === cur) return;
+  try { const r = await api('/api/folder/rename', { path: node.path, name: v }); if (S.selFolder === node.path) S.selFolder = r.path; await afterChange(); } catch (e) { fail(e); }
+}
+
+async function newFolder(parent) {
+  if (!parent) { const f = await pickFolder(); if (!f) return; parent = f; }
+  const v = await ask({ title: t('newFolder'), label: t('name'), help: parent });
+  if (!v) return;
+  try { const r = await api('/api/folder/new', { parent, name: v }); S.selFolder = r.path; setExpanded(parent, true); await afterChange(); } catch (e) { fail(e); }
+}
+
+async function openFolderFlow() {
+  const f = await pickFolder();
+  if (!f) return;
+  try { const r = await api('/api/folder/add', { path: f, create: true }); S.selFolder = r.path; await afterChange(); } catch (e) { fail(e); }
+}
+
+async function newConversation(folder) {
+  folder = folder || S.selFolder || S.conv?.record?.cwd;
+  if (!folder) { folder = await pickFolder(); if (!folder) return; }
+  try {
+    const m = defaultModelFor('codex');
+    const r = await api('/api/conversation/new', { folder, modelKey: m?.key, effort: chooseEffort(m) });
+    await loadState(false);
+    await openConversation(r.key, { isNew: true });
+  } catch (e) { fail(e); }
+}
+
+function toggleSidebar(hidden) { patchSettings({ sidebarHidden: hidden }); $.body.classList.toggle('side-hidden', hidden); renderMain(); }
+
+// ------------------------------------------------------------------ folder picker
+function pickFolder(start) {
+  return new Promise((resolve) => {
+    let cur = null, done = false;
+    const pathEl = h('div', { class: 'picker-path' });
+    const list = h('div', { class: 'picker-list' });
+    const typed = h('input', { class: 'input', placeholder: S.sum.platform === 'win32' ? 'D:\\X1191\\New topic' : '/home/me/projects/new-topic', spellcheck: 'false' });
+    const load = async (p) => {
+      try {
+        const r = await api('/api/fs/list' + q({ path: p || '' }));
+        cur = r.path; pathEl.textContent = r.path || '—';
+        list.replaceChildren(
+          ...(r.parent != null ? [h('button', { onclick: () => load(r.parent), html: icon('chevron', 'rot') + '<span>..</span>' })] : []),
+          ...r.dirs.map((d) => h('button', { ondblclick: () => load(d.path), onclick: (e) => { list.querySelectorAll('button').forEach((b) => b.style.background = ''); e.currentTarget.style.background = 'var(--accent-soft)'; cur = d.path; pathEl.textContent = d.path; }, html: icon(r.path ? 'folder' : 'drive') + `<span>${esc(d.name)}</span>` })),
+        );
+      } catch (e) { fail(e); }
+    };
+    const finish = (v) => { done = true; m.close(); resolve(v); };
+    const m = modal({ title: t('folderPicker'), cls: 'mid', body: h('div', {}, pathEl, list, h('label', { class: 'field' }, h('span', {}, t('newFolderPath')), typed)),
+      foot: [h('button', { class: 'btn', onclick: () => m.close() }, t('cancel')), h('button', { class: 'btn primary', onclick: () => { const v = typed.value.trim() || cur; if (v) finish(v); } }, t('choose'))],
+      onClose: () => { if (!done) resolve(null); } });
+    load(start || S.selFolder || '');
+  });
+}
+
+// ------------------------------------------------------------------ models
+function modelsFor(agent) { return (S.sum.models || []).filter((m) => m.agent === agent); }
+function defaultModelFor(agent, prefer) {
+  const list = modelsFor(agent);
+  return list.find((m) => m.key === prefer) || list.find((m) => m.key === settings().lastModelKey) || list.find((m) => m.isDefault) || list[0] || null;
+}
+function chooseEffort(model, prefer) {
+  if (!model) return prefer || null;
+  const list = model.efforts?.length ? model.efforts : ['low', 'medium', 'high'];
+  for (const e of [prefer, settings().modelEfforts?.[model.key], model.defaultEffort, 'medium']) if (e && list.includes(e)) return e;
+  return list[0];
+}
+
+// ------------------------------------------------------------------ conversation
+async function openConversation(key, { quiet = false, limit, isNew = false, focusText } = {}) {
+  try {
+    const data = await api('/api/conversation' + q({ key, ...(limit ? { limit } : {}) }));
+    const keepCompose = quiet && S.conv?.key === key;
+    S.conv = data; S.itemIdx = new Map(data.items.map((i) => [i.id, i]));
+    if (!data.draft) S.conv.draft = store.get('draft.' + key, '');
+    S.selFolder = data.record.cwd;
+    if (!keepCompose) {
+      const m = defaultModelFor(data.record.agent, data.record.modelKey);
+      S.compose = { modelKey: m?.key || null, effort: chooseEffort(m, data.record.effort), mode: data.record.actionMode || settings().defaultActionMode || 'ask' };
+      S.banner = null; S.git.st = null;
+    }
+    renderSidebar(); renderMain(); if (settings().gitPanelOpen) loadGit();
+    if (focusText) highlightText(focusText);
+    if (isNew) memorySetupDialog(key, { isNew: true });
+    else if (!quiet && data.record.memoryState === 'ask' && settings().askMemory !== false) askMemoryForExisting(key);
+  } catch (e) { fail(e); }
+}
+
+function highlightText(text) {
+  const needle = text.toLowerCase();
+  const els = [...($.streamInner?.querySelectorAll('.msg-user, .msg-agent') || [])];
+  const el = els.reverse().find((x) => x.textContent.toLowerCase().includes(needle));
+  if (!el) return;
+  el.scrollIntoView({ block: 'center' });
+  el.classList.add('flash'); setTimeout(() => el.classList.remove('flash'), 2600);
+}
+
+// ------------------------------------------------------------------ memory setup (opt-in context & instructions)
+async function askMemoryForExisting(key) {
+  const dont = h('input', { type: 'checkbox' });
+  let answered = false;
+  const m = modal({ title: t('memAskExisting'), body: h('div', {}, h('p', {}, t('memAskText')), h('label', { class: 'check' }, dont, h('span', {}, t('dontAskAgain')))),
+    foot: [
+      h('button', { class: 'btn', onclick: async () => { answered = true; m.close(); if (dont.checked) patchSettings({ askMemory: false }, true); await api('/api/conversation/memory-setup', { key, enable: false }).catch(fail); if (S.conv?.key === key) S.conv.record.memoryState = 'declined'; } }, t('noThanks')),
+      h('button', { class: 'btn primary', onclick: () => { answered = true; m.close(); memorySetupDialog(key, { isNew: false }); } }, t('yesCreate'))],
+    onClose: () => { void answered; } });
+}
+
+/** Window with the conversation name and two independent boxes (context / instructions). */
+function memorySetupDialog(key, { isNew }) {
+  const rec = S.conv?.key === key ? S.conv.record : convByKey().get(key) || {};
+  const title = h('input', { class: 'input', value: rec.title && rec.title !== t('untitled') && rec.title !== 'New conversation' ? rec.title : '', placeholder: t('untitled') });
+  const ctx = h('textarea', { class: 'input', rows: 7, placeholder: 'e.g. Optical bench X1191 — 5 MP camera, 3.45 µm pixels. Calibration images in ./calib. Goal: focal length within ±0.5 %.' });
+  const ins = h('textarea', { class: 'input', rows: 7, placeholder: 'e.g. Explain the method before running code. Use MATLAB. Report values with uncertainty. Ask before deleting files.' });
+  let done = false;
+  const finish = async (enable) => {
+    done = true;
+    try {
+      const r = await api('/api/conversation/memory-setup', { key, enable, title: title.value.trim(), context: enable ? ctx.value : '', instructions: enable ? ins.value : '' });
+      m.close();
+      if (r.warnings?.length) toast(r.warnings.join('\n'));
+      await loadState(false);
+      if (S.conv?.key === key) { await refreshMemoryInfo(); S.conv.record.memoryState = r.memoryState; renderMain(); }
+      setTimeout(() => $.input?.focus(), 60);
+    } catch (e) { done = false; fail(e); }
+  };
+  const m = modal({ title: t('memSetupTitle'), cls: 'mid', body: h('div', {}, h('p', { class: 'help' }, t('memSetupIntro')),
+      field(t('title'), title), field(t('contextBox'), ctx), field(t('instructionsBox'), ins)),
+    foot: [h('button', { class: 'btn', onclick: () => finish(false) }, isNew ? t('skipNoFiles') : t('noThanks')), h('button', { class: 'btn primary', onclick: () => finish(true) }, t('createFiles'))],
+    onClose: () => { if (!done && isNew && title.value.trim()) api('/api/conversation/rename', { key, title: title.value.trim() }).then(() => loadState(false)).catch(() => {}); } });
+  setTimeout(() => title.focus(), 40);
+}
+
+// ------------------------------------------------------------------ search (rec. 4)
+function flatFolders(nodes, depth = 0, out = []) { for (const n of nodes) { out.push({ path: n.path, label: '  '.repeat(depth) + n.name }); if (depth < 4) flatFolders(n.children, depth + 1, out); } return out; }
+function openSearch() {
+  const qi = h('input', { class: 'input', placeholder: t('searchPlaceholder'), spellcheck: 'false' });
+  const folder = h('select', { class: 'input' }, h('option', { value: '' }, t('anyFolder')), ...flatFolders(S.sum.tree).map((f) => h('option', { value: f.path }, f.label)));
+  const days = h('select', { class: 'input' }, ...[['', t('anyTime')], ['7', t('last7')], ['30', t('last30')], ['90', t('last90')]].map(([v, l]) => h('option', { value: v }, l)));
+  const list = h('div', { class: 'list search-results' });
+  let timer, seq = 0;
+  const run = async () => {
+    const my = ++seq;
+    if (qi.value.trim().length < 2) { list.replaceChildren(); return; }
+    list.replaceChildren(h('div', { class: 'li help' }, '…'));
+    try {
+      const r = await api('/api/search' + q({ q: qi.value, folder: folder.value, days: days.value }));
+      if (my !== seq) return;
+      if (!r.results.length) { list.replaceChildren(h('div', { class: 'li help' }, t('noResults'))); return; }
+      const kindLabel = { title: t('inTitle'), user: t('inUser'), agent: t('inAgent'), memory: t('inMemory') };
+      list.replaceChildren(...r.results.map((x) => h('button', { class: 'li search-hit', onclick: () => { m.close(); if (x.kind === 'memory' && x.file) openMemoryEditor(x.file, x.fileName); else if (x.key) openConversation(x.key, { limit: 5000, focusText: x.match || qi.value.split(/\s+/)[0] }); } },
+        h('span', { class: 'badge' }, kindLabel[x.kind] || x.kind),
+        h('div', { class: 'grow' }, h('div', {}, x.title || x.fileName || ''), h('div', { class: 'sub', html: markTerms(x.snippet, qi.value) }), h('div', { class: 'sub' }, `${x.cwd || ''} · ${fmtTime(x.updatedAt)}`)))));
+    } catch (e) { list.replaceChildren(h('div', { class: 'li help' }, e.message)); }
+  };
+  qi.addEventListener('input', () => { clearTimeout(timer); timer = setTimeout(run, 250); });
+  folder.onchange = run; days.onchange = run;
+  const m = modal({ title: t('searchAll'), cls: 'mid', body: h('div', {}, qi, h('div', { class: 'inline' }, field(t('openFolder'), folder), field(t('created'), days)), list) });
+  setTimeout(() => qi.focus(), 40);
+}
+function markTerms(text, query) {
+  let html = esc(text);
+  for (const term of query.split(/\s+/).filter((x) => x.length > 1)) html = html.replace(new RegExp(term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi'), (mm) => `<mark>${mm}</mark>`);
+  return html;
+}
+document.addEventListener('keydown', (e) => { if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k' && S.sum) { e.preventDefault(); openSearch(); } });
+
+// ------------------------------------------------------------------ memory workspace (rec. 5)
+async function openMemoryWorkspace() {
+  if (!S.conv) return;
+  const key = S.conv.key;
+  const body = h('div');
+  const draw = async () => {
+    let p;
+    try { p = await api('/api/memory/preview' + q({ key })); } catch (e) { body.replaceChildren(h('div', { class: 'errorbox' }, e.message)); return; }
+    const exclude = new Set(p.parts.filter((x) => !x.included && x.file).map((x) => x.file));
+    const setExclude = async () => { await api('/api/conversation/options', { key, exclude: [...exclude] }).catch(fail); draw(); };
+    const pinInput = h('input', { class: 'input', placeholder: t('pinPlaceholder') });
+    const addPin = async () => { const v = pinInput.value.trim(); if (!v) return; await api('/api/conversation/options', { key, pins: [...p.pins, v] }).catch(fail); draw(); };
+    pinInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') addPin(); });
+    const tag = (c) => c === 'changed' ? h('span', { class: 'kindtag update' }, t('changed')) : c === 'new' ? h('span', { class: 'kindtag add' }, t('isNew')) : c === 'same' ? h('span', { class: 'kindtag' }, t('unchanged')) : null;
+    body.replaceChildren(
+      p.memoryState !== 'enabled' ? h('div', { class: 'banner info' }, h('span', { html: icon('info') }), h('span', {}, t('memoryOff')), h('span', { class: 'x' }, h('button', { class: 'btn small primary', onclick: () => { mm.close(); memorySetupDialog(key, { isNew: false }); } }, t('createMemory')))) : null,
+      h('div', { class: 'banner ' + (p.willSend ? 'info' : '') }, h('span', { html: icon(p.willSend ? 'send' : 'check') }), h('span', {}, `${p.willSend ? t('willSendNext') : t('notResent')} · ${t('tokensApprox', { n: p.totalTokens })}`)),
+      h('h3', {}, t('pins')),
+      h('div', { class: 'list' }, ...(p.pins.length ? p.pins.map((pin, i) => h('div', { class: 'li' }, h('span', { html: icon('tag') }), h('div', { class: 'grow' }, pin), h('button', { class: 'btn small', onclick: async () => { await api('/api/conversation/options', { key, pins: p.pins.filter((_, j) => j !== i) }).catch(fail); draw(); } }, t('remove'))))
+        : [h('div', { class: 'li help' }, '—')])),
+      h('div', { class: 'inline' }, h('div', { class: 'field' }, pinInput), h('button', { class: 'btn', style: { marginBottom: '4px' }, onclick: addPin, html: icon('tag') + t('addPin') })),
+      h('h3', {}, t('sharedContext')),
+      h('div', { class: 'list' }, ...p.parts.filter((x) => x.file).map((x) => {
+        const cb = h('input', { type: 'checkbox', checked: x.included, onchange: (e) => { if (e.target.checked) exclude.delete(x.file); else exclude.add(x.file); setExclude(); } });
+        const diff = x.diff?.length ? h('details', {}, h('summary', { class: 'help', style: { cursor: 'pointer' } }, t('diff')), h('pre', { class: 'codeblock', html: x.diff.map((d) => `<span class="${d.op === '+' ? 'd-add' : d.op === '-' ? 'd-del' : ''}">${d.op === '=' ? ' ' : d.op} ${esc(d.line)}</span>`).join('\n') })) : null;
+        return h('div', { class: 'li', style: { alignItems: 'flex-start' } }, h('label', { class: 'check', style: { margin: '2px 0' }, 'data-tip': t('include') }, cb),
+          h('div', { class: 'grow' }, h('div', {}, x.label, ' ', tag(x.changed)), h('div', { class: 'sub' }, `${x.file} · ${x.chars} chars · ${t('tokensApprox', { n: x.tokens })}${x.truncated ? ' · truncated' : ''}`), diff),
+          h('button', { class: 'btn small', onclick: () => openMemoryEditor(x.file, x.label).then(() => {}) }, t('edit')));
+      })),
+      p.warnings?.length ? h('div', { class: 'help' }, p.warnings.join('\n')) : null);
+  };
+  const mm = modal({ title: t('memoryWorkspace'), cls: 'mid', body, onClose: () => refreshMemoryInfo() });
+  draw();
+}
+
+function renderMain() {
+  const hidden = !!settings().sidebarHidden;
+  $.body.classList.toggle('side-hidden', hidden);
+  if (!S.conv) return renderWelcome(hidden);
+  const r = S.conv.record;
+  const showBtn = hidden ? ib('sidebarOpen', t('showFolders'), () => toggleSidebar(false)) : null;
+  const titleEl = h('h1', { title: r.title, ondblclick: () => inlineRename(titleEl) }, r.title || t('untitled'));
+  const loc = h('div', { class: 'loc' },
+    h('button', { 'data-tip': t('revealFolder'), onclick: () => api('/api/reveal', { path: r.cwd }).catch(fail) }, r.cwd || '—'),
+    r.rolloutName ? [' ', h('button', { 'data-tip': t('rollout'), onclick: () => r.rollout && api('/api/reveal', { path: r.rollout }).catch(fail) }, `(${r.rolloutName})`)] : null);
+  $.status = h('div', { class: 'status-chip-wrap' });
+  const head = h('div', { class: 'conv-head' }, showBtn,
+    h('div', { class: 'conv-title' }, titleEl, loc), $.status,
+    ib('search', t('searchAll'), openSearch),
+    ib('eye', t('memoryWorkspace'), openMemoryWorkspace),
+    r.agent !== 'codex' ? h('span', { class: 'badge', html: icon('bot') + esc(S.sum.agents[r.agent]?.label || r.agent) }) : null,
+    ib('edit', t('rename'), () => inlineRename(titleEl)),
+    ib('more', '⋯', (e) => convMenu(e.currentTarget, { ...convByKey().get(S.conv.key), key: S.conv.key, title: r.title, cwd: r.cwd })));
+  $.stream = h('div', { class: 'stream' });
+  $.streamInner = h('div', { class: 'stream-inner' });
+  $.stream.append($.streamInner);
+  $.stream.addEventListener('click', onStreamClick);
+  $.main.replaceChildren(head, $.stream, renderComposer());
+  renderStream(true);
+  renderStatus();
+}
+
+function currentPhase() {
+  if (!S.conv) return null;
+  if (S.conv.pending?.length) return 'approval';
+  if (S.conv.running) return S.phase[S.conv.key] === 'queued' ? 'queued' : 'running';
+  return S.phase[S.conv.key] || null;
+}
+function renderStatus() {
+  if (!$.status || !S.conv) return;
+  const ph = currentPhase();
+  const ack = S.ack[S.conv.key], use = S.usage[S.conv.key];
+  const cls = { queued: 'starting', running: 'running', approval: 'starting', completed: 'ready', failed: 'error', interrupted: '' }[ph] || '';
+  const tip = ack ? `${t('ackLabel')}: ${ack.model || '?'}${ack.effort ? ' · ' + effortLabel(ack.effort) : ''}${ack.provider ? ' · ' + ack.provider : ''}` : '';
+  $.status.replaceChildren(
+    ph ? h('span', { class: `agent-pill status-${ph}`, 'data-tip': tip || t('status.' + ph) }, h('span', { class: `dot ${cls}` }), t('status.' + ph)) : null,
+    ack ? h('span', { class: 'badge', 'data-tip': tip }, `${ack.model || ''}${ack.effort ? ' · ' + effortLabel(ack.effort) : ''}`) : null,
+    use ? h('span', { class: 'badge', 'data-tip': t('tokens') }, `${fmtNum(use)} ${t('tokens')}`) : null);
+}
+const fmtNum = (u) => { const n = typeof u === 'number' ? u : u?.total?.totalTokens ?? u?.totalTokens ?? u?.total_tokens ?? u?.last?.totalTokens ?? null; return n == null ? '—' : n >= 1000 ? (n / 1000).toFixed(1) + 'k' : String(n); };
+
+function inlineRename(titleEl) {
+  const cur = S.conv.record.title;
+  const inp = h('input', { value: cur });
+  titleEl.replaceChildren(inp); inp.focus(); inp.select();
+  let finished = false;
+  const done = async (save) => {
+    if (finished) return; finished = true;
+    const v = inp.value.trim();
+    if (save && v && v !== cur) { try { await api('/api/conversation/rename', { key: S.conv.key, title: v }); S.conv.record.title = v; await loadState(false); } catch (e) { fail(e); } }
+    titleEl.textContent = S.conv.record.title || t('untitled');
+    renderSidebar();
+  };
+  inp.addEventListener('keydown', (e) => { if (e.key === 'Enter') done(true); if (e.key === 'Escape') done(false); });
+  inp.addEventListener('blur', () => done(true));
+}
+
+function renderWelcome(hidden) {
+  const cx = S.sum.agents.codex;
+  const recent = (S.sum.conversations || []).filter((c) => !c.archived).slice(0, 6);
+  $.main.replaceChildren(h('div', { class: 'welcome' }, h('div', { class: 'card' },
+    hidden ? h('div', { style: { textAlign: 'left' } }, ib('sidebarOpen', t('showFolders'), () => toggleSidebar(false))) : null,
+    h('div', { class: 'mark', html: icon('logo') }),
+    h('h1', {}, t('welcomeTitle')),
+    h('p', {}, t('welcomeText')),
+    cx.state === 'error' || cx.state === 'missing' ? h('div', { class: 'banner err' }, h('span', { html: icon('warn') }), h('span', {}, cx.error || t('setupCodex'))) : null,
+    h('div', { class: 'actions' },
+      h('button', { class: 'btn primary', onclick: () => newConversation(), html: icon('chatPlus') + t('newChat') }),
+      h('button', { class: 'btn', onclick: openFolderFlow, html: icon('folderOpen') + t('openFolder') }),
+      cx.state !== 'ready' ? h('button', { class: 'btn', onclick: reconnect, html: icon('refresh') + t('reconnect') }) : null),
+    recent.length ? h('div', { class: 'recent' }, ...recent.map((c) => h('button', { onclick: () => openConversation(c.key), html: icon('chat') + `<span>${esc(c.title)}</span><small>${esc(c.cwd.split(/[\\/]/).filter(Boolean).slice(-2).join(' › '))} · ${fmtTime(c.updatedAt)}</small>` }))) : null,
+    h('p', { class: 'help', style: { marginTop: '28px' } }, S.sum.brand.copyright))));
+}
+
+// ---------- stream rendering
+function nearBottom() { const s = $.stream; return !s || s.scrollHeight - s.scrollTop - s.clientHeight < 140; }
+function scrollBottom(force) { if ($.stream && (force || nearBottom())) $.stream.scrollTop = $.stream.scrollHeight; }
+
+function renderStream(force) {
+  if (!$.streamInner || !S.conv) return;
+  const stick = force || nearBottom();
+  $.streamInner.replaceChildren();
+  if (S.conv.offset > 0) $.streamInner.append(h('button', { class: 'btn small', style: { alignSelf: 'center' }, onclick: loadEarlier, html: icon('history') + `${esc(t('showEarlier'))} (${S.conv.offset})` }));
+  for (const it of S.conv.items) { const el = itemEl(it); if (el) $.streamInner.append(el); }
+  for (const p of S.conv.pending || []) $.streamInner.append(approvalEl(p));
+  if (S.conv.running) $.streamInner.append(h('div', { class: 'thinking', id: 'thinking', html: '<span class="dots"><span></span><span></span><span></span></span>' + esc(t('running')) }));
+  if (stick) requestAnimationFrame(() => scrollBottom(true));
+}
+
+async function loadEarlier() {
+  try {
+    const before = S.conv.offset;
+    const r = await api('/api/conversation/older' + q({ key: S.conv.key, before, limit: 120 }));
+    const h0 = $.stream.scrollHeight;
+    S.conv.items = [...r.items, ...S.conv.items]; S.conv.offset = r.offset;
+    for (const i of r.items) S.itemIdx.set(i.id, i);
+    renderStream(false);
+    $.stream.scrollTop = $.stream.scrollHeight - h0;
+  } catch (e) { fail(e); }
+}
+
+function itemEl(it) {
+  let el;
+  switch (it.kind) {
+    case 'user':
+      el = h('div', { class: 'msg-user' }, it.text);
+      if (it.context) el.append(h('details', { class: 'ctx-chip ctx' }, h('summary', { html: icon('book') + esc(t('sharedContext')) }), h('pre', {}, it.context)));
+      break;
+    case 'agent': el = h('div', { class: 'msg-agent', html: renderMarkdown(it.text) }); break;
+    case 'plan': el = h('div', { class: 'msg-agent', html: '<p><strong>Plan</strong></p>' + renderMarkdown(it.text) }); break;
+    case 'reasoning': return null; // private reasoning stays hidden, like the CLI
+    case 'command': {
+      const running = it.status === 'inProgress';
+      const code = it.exitCode;
+      const badge = running ? '<span class="exit run">…</span>' : code == null ? (it.status === 'declined' ? `<span class="exit bad">${esc(t('decline'))}</span>` : '') : `<span class="exit ${code === 0 ? 'ok' : 'bad'}">${t('exit')} ${code}</span>`;
+      el = h('details', { class: 'work', open: running || (code != null && code !== 0) ? true : null },
+        h('summary', { html: icon('terminal') + `<span class="cmd">${esc(it.command)}</span>${badge}${it.durationMs ? `<span class="badge">${(it.durationMs / 1000).toFixed(1)} s</span>` : ''}` }),
+        h('pre', { class: 'term', html: `<span class="p">$ ${esc(it.command)}</span>\n${esc(it.output || '')}` }));
+      break;
+    }
+    case 'fileChange':
+      el = h('details', { class: 'work', open: true },
+        h('summary', { html: icon('file') + `<span class="cmd">${esc(t('files'))} · ${it.changes.length}</span>${it.status === 'declined' ? `<span class="exit bad">${esc(t('decline'))}</span>` : it.status === 'failed' ? '<span class="exit bad">failed</span>' : ''}` }),
+        ...it.changes.map((c) => h('div', { class: 'filechg' },
+          h('div', { class: 'fname', html: `<span class="kindtag ${esc(c.kind)}">${esc(c.kind)}</span><span>${esc(c.path)}${c.movePath ? ' → ' + esc(c.movePath) : ''}</span>` }),
+          c.diff ? h('pre', { html: diffHtml(c.diff) }) : null)));
+      break;
+    case 'tool':
+      el = h('details', { class: 'work' },
+        h('summary', { html: icon(it.server === 'web' ? 'globe' : 'tool') + `<span class="cmd">${esc(it.server)} · ${esc(it.tool)}</span>${it.failed ? '<span class="exit bad">error</span>' : it.status === 'inProgress' ? '<span class="exit run">…</span>' : ''}` }),
+        it.args ? h('pre', { html: highlightCode(JSON.stringify(it.args, null, 2), 'json') }) : null,
+        it.output ? h('pre', { class: 'term' }, it.output.slice(0, 20000)) : null);
+      break;
+    case 'error': el = h('div', { class: 'errorbox' }, it.text); break;
+    case 'notice': el = h('div', { class: 'notice' }, it.text); break;
+    default: return null;
+  }
+  el.dataset.id = it.id;
+  return el;
+}
+
+function approvalEl(p) {
+  const titles = { command: 'approvalCommand', fileChange: 'approvalFile', permissions: 'approvalPerm', question: 'approvalQuestion', elicitation: 'approvalQuestion' };
+  const send = (decision, answers) => api('/api/conversation/approve', { key: S.conv.key, requestKey: p.requestKey, decision, answers }).then(() => { S.conv.pending = S.conv.pending.filter((x) => x.requestKey !== p.requestKey); renderStream(); }).catch(fail);
+  const box = h('div', { class: 'approval', 'data-req': p.requestKey },
+    h('h4', { html: icon('shield') + esc(t(titles[p.kind] || 'approvalCommand')) }),
+    p.command ? h('code', {}, Array.isArray(p.command) ? p.command.join(' ') : p.command) : null,
+    p.cwd ? h('div', { class: 'help' }, p.cwd) : null,
+    p.reason ? h('div', {}, p.reason) : null,
+    p.message ? h('div', {}, p.message) : null,
+    p.permissions ? h('pre', {}, JSON.stringify(p.permissions, null, 2)) : null);
+  if (p.kind === 'question' && Array.isArray(p.questions)) {
+    const inputs = {};
+    for (const qn of p.questions) {
+      const inp = qn.options?.length ? h('select', { class: 'input' }, ...qn.options.map((o) => h('option', { value: o.label ?? o.value ?? o }, o.label ?? o.value ?? o))) : h('input', { class: 'input', type: qn.isSecret ? 'password' : 'text' });
+      inputs[qn.id] = inp;
+      box.append(h('label', { class: 'field' }, h('span', {}, qn.header ? `${qn.header} — ${qn.question}` : qn.question), inp));
+    }
+    box.append(h('div', { class: 'actions' }, h('button', { class: 'btn primary small', onclick: () => send('accept', Object.fromEntries(Object.entries(inputs).map(([k, v]) => [k, v.value]))) }, t('answer')), h('button', { class: 'btn small', onclick: () => send('cancel') }, t('cancel'))));
+  } else {
+    box.append(h('div', { class: 'actions' },
+      h('button', { class: 'btn primary small', onclick: () => send('accept') }, t('allow')),
+      p.kind !== 'elicitation' ? h('button', { class: 'btn small', onclick: () => send('acceptForSession') }, t('allowSession')) : null,
+      h('button', { class: 'btn small', onclick: () => send('decline') }, t('decline')),
+      h('button', { class: 'btn small danger', onclick: () => send('cancel') }, t('cancelTurn'))));
+  }
+  return box;
+}
+
+function onStreamClick(e) {
+  const b = e.target.closest('[data-copy]');
+  if (b) { const code = b.closest('.codeblock')?.querySelector('code'); if (code) copyText(code.textContent); }
+}
+
+/** Incremental update for streamed items (only the affected element is redrawn). */
+function upsertItem(it) {
+  if (!S.conv) return;
+  const prev = S.itemIdx.get(it.id);
+  if (prev) Object.assign(prev, it); else { S.conv.items.push(it); S.itemIdx.set(it.id, it); }
+  const cur = S.itemIdx.get(it.id);
+  const old = $.streamInner?.querySelector(`[data-id="${CSS.escape(it.id)}"]`);
+  const el = itemEl(cur);
+  const stick = nearBottom();
+  if (old && el) { if (old.tagName === 'DETAILS' && el.tagName === 'DETAILS' && !old.open && cur.status !== 'inProgress') el.open = false; old.replaceWith(el); }
+  else if (el && $.streamInner) { const anchor = $.streamInner.querySelector('.approval, #thinking'); $.streamInner.insertBefore(el, anchor); }
+  if (stick) scrollBottom(true);
+}
+const deltaQueue = new Map(); let deltaRaf = 0;
+function applyDelta(itemId, field, delta) {
+  const it = S.itemIdx.get(itemId);
+  if (!it) { const n = { id: itemId, kind: field === 'output' ? 'command' : 'agent', text: '', output: '', status: 'inProgress', command: '' }; n[field] = delta; S.conv.items.push(n); S.itemIdx.set(itemId, n); }
+  else it[field] = (it[field] || '') + delta;
+  deltaQueue.set(itemId, true);
+  if (!deltaRaf) deltaRaf = requestAnimationFrame(() => { deltaRaf = 0; for (const id of deltaQueue.keys()) upsertItem(S.itemIdx.get(id)); deltaQueue.clear(); });
+}
+
+// ---------- composer
+function renderComposer() {
+  const r = S.conv.record;
+  const draftKey = 'draft.' + S.conv.key;
+  const ta = h('textarea', { rows: 2, placeholder: t('placeholder'), spellcheck: 'true' });
+  ta.value = S.conv.draft || store.get(draftKey, '');
+  const autosize = () => { ta.style.height = 'auto'; ta.style.height = Math.min(ta.scrollHeight, 260) + 'px'; };
+  ta.addEventListener('input', () => { S.conv.draft = ta.value; saveDraft(S.conv.key, ta.value); autosize(); });
+  ta.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); send(); } });
+  $.input = ta; setTimeout(autosize, 0);
+
+  const models = modelsFor(r.agent);
+  const modelSel = h('select', { class: 'sel', 'data-tip': t('model'), 'data-tip-pos': 'up', onchange: (e) => { const m = models.find((x) => x.key === e.target.value); S.compose.modelKey = m.key; S.compose.effort = chooseEffort(m, S.compose.effort); patchSettings({ lastModelKey: m.key }); refreshEffort(); } },
+    ...models.map((m) => h('option', { value: m.key, selected: m.key === S.compose.modelKey }, m.label + (m.source === 'custom' && m.provider ? ` · ${m.provider}` : ''))));
+  const effortSel = h('select', { class: 'sel', 'data-tip': t('effort'), 'data-tip-pos': 'up', onchange: (e) => { S.compose.effort = e.target.value; const m = models.find((x) => x.key === S.compose.modelKey); if (m) patchSettings({ modelEfforts: { ...(settings().modelEfforts || {}), [m.key]: e.target.value } }); } });
+  const refreshEffort = () => {
+    const m = models.find((x) => x.key === S.compose.modelKey);
+    const list = m?.efforts?.length ? m.efforts : [];
+    effortSel.replaceChildren(...list.map((e) => h('option', { value: e, selected: e === S.compose.effort }, effortLabel(e))));
+    effortSel.classList.toggle('hidden', !list.length);
+  };
+  refreshEffort();
+  const modes = S.sum.actionModes || ['default', 'ask', 'project', 'readonly', 'full'];
+  const modeSel = h('select', { class: 'sel', 'data-tip': t(`modeHelp.${S.compose.mode}`), 'data-tip-pos': 'up', onchange: (e) => { S.compose.mode = e.target.value; modeSel.dataset.tip = t(`modeHelp.${e.target.value}`); api('/api/conversation/options', { key: S.conv.key, actionMode: e.target.value }).catch(fail); } },
+    ...modes.map((m) => h('option', { value: m, selected: m === S.compose.mode }, `${m === 'full' ? '⚠ ' : ''}${t('mode.' + m)}`)));
+  const mem = S.conv.memory || {};
+  const memBtn = (iconName, tip, file, folderKind) => ib(iconName, tip, () => file ? openMemoryEditor(file, tip) : folderKind ? openFolderMemory(r.cwd, folderKind) : toast('—'), { attrs: { 'data-tip-pos': 'up' } });
+  const linkCount = (mem.links || []).length;
+  $.sendBtn = h('button', { class: `sendbtn ${S.conv.running ? 'stop' : ''}`, 'data-tip': S.conv.running ? t('stop') : t('send'), 'data-tip-pos': 'up', html: icon(S.conv.running ? 'stop' : 'send'), onclick: () => (S.conv.running ? stopTurn() : send()) });
+
+  const gitOn = S.sum.tools.git.enabled;
+  const g = (name, tip, fn) => ib(name, tip, fn, { attrs: { 'data-tip-pos': 'up' } });
+  const gitbar = gitOn ? h('div', { class: 'gitbar' },
+    h('span', { class: 'lbl', html: icon('branch') + esc(S.git.st?.branch || 'Git') }),
+    g('commit', t('commit'), () => { openGit(); setTimeout(() => document.getElementById('gp-msg')?.focus(), 200); }),
+    g('fetch', t('fetch'), () => gitOp('fetch')),
+    g('pull', t('pull'), () => gitOp('pull')),
+    g('push', t('push'), () => gitOp('push')),
+    g('pr', t('pr'), () => gitPR()),
+    g('branch', t('newBranch'), () => gitBranchCreate()),
+    g('merge', t('merge'), () => gitPickBranch('merge')),
+    g('rebase', t('rebase'), () => gitPickBranch('rebase')),
+    g('stash', t('stash'), () => gitOp('stash')),
+    g('history', t('log'), () => gitLog()),
+    g('more', t('gitPanel'), () => toggleGit())) : null;
+
+  const banner = composerBanner();
+  return h('div', { class: 'composer' }, h('div', { class: 'composer-inner' }, banner,
+    h('div', { class: 'inputbox' }, ta,
+      h('div', { class: 'controls' },
+        modelSel, effortSel, modeSel,
+        h('span', { class: 'sep' }),
+        memBtn('fileText', t('folderContext'), mem.folder?.context, 'context'),
+        memBtn('book', t('folderInstructions'), mem.folder?.instructions, 'instructions'),
+        memBtn('chat', t('convContext'), mem.conversation?.context),
+        memBtn('list', t('convInstructions'), mem.conversation?.instructions),
+        ib('link', `${t('linkContexts')}${linkCount ? ` (${linkCount})` : ''}`, openLinkDialog, { class: linkCount ? 'active' : '', attrs: { 'data-tip-pos': 'up' } }),
+        h('span', { class: 'grow' }),
+        $.sendBtn)),
+    gitbar));
+}
+
+/**
+ * One banner, chosen by cause (rec. 1): browser disconnected from the app → agent process down → last send error.
+ * Every case keeps the draft and offers the matching recovery action.
+ */
+function composerBanner() {
+  const cx = S.sum.agents[S.conv?.record?.agent || 'codex'];
+  let b = null;
+  if (S.conn === 'lost') b = { kind: 'err', text: t('connLost'), actions: [{ label: t('retryNow'), run: () => { connectEvents(); loadState(false); } }] };
+  else if (cx && !['ready', 'idle'].includes(cx.state)) b = { kind: 'warn', text: `${t('agentStopped')}${cx.error ? '\n' + cx.error : ''}`, actions: [{ label: t('reconnect'), run: reconnect }] };
+  else if (S.banner) b = S.banner;
+  if (!b) return null;
+  return h('div', { class: `banner ${b.kind}` }, h('span', { html: icon(b.kind === 'info' ? 'info' : 'warn') }), h('span', { style: { whiteSpace: 'pre-wrap' } }, b.text),
+    h('span', { class: 'x', style: { display: 'flex', gap: '6px', alignItems: 'center' } }, ...(b.actions || []).map((a) => h('button', { class: 'btn small', onclick: a.run }, a.label)),
+      b === S.banner ? ib('close', t('close'), () => { S.banner = null; renderMain(); }) : null));
+}
+
+let draftTimer;
+function saveDraft(key, text) {
+  store.set('draft.' + key, text);
+  clearTimeout(draftTimer);
+  draftTimer = setTimeout(() => api('/api/drafts', { key, text }).catch(() => {}), 500);
+}
+
+async function send() {
+  if (!S.conv || S.sending) return;
+  const text = $.input.value.trim();
+  if (!text) return;
+  S.sending = true; $.sendBtn.disabled = true;
+  const key = S.conv.key;
+  const doneBefore = S.turnsDone[key] || 0;
+  S.phase[key] = 'queued'; renderStatus();
+  try {
+    const r = await api('/api/conversation/send', { key, text, modelKey: S.compose.modelKey, effort: S.compose.effort, actionMode: S.compose.mode });
+    clearTimeout(draftTimer); store.set('draft.' + key, ''); S.conv.draft = ''; $.input.value = ''; $.input.style.height = 'auto';
+    // A fast turn can complete before this response arrives: only mark running if it has not finished yet.
+    const finished = (S.turnsDone[key] || 0) > doneBefore;
+    if (!finished) { S.conv.running = true; if (S.phase[key] === 'queued') S.phase[key] = 'running'; }
+    S.banner = r.warnings?.length ? { kind: 'warn', text: `${t('memoryWarn')}\n${r.warnings.join('\n')}` } : !r.contextSent && S.conv.memory?.conversation?.context ? null : null;
+    renderMain();
+  } catch (e) {
+    // The draft is kept in every failure case; the banner offers the matching recovery.
+    delete S.phase[key];
+    S.banner = e.code === 'WRITER_LOCK' ? { kind: 'err', text: t('writerLock'), actions: [{ label: t('retrySend'), run: () => { S.banner = null; send(); } }] }
+      : e.code === 'NETWORK' ? { kind: 'err', text: t('connLost'), actions: [{ label: t('retrySend'), run: () => { S.banner = null; send(); } }] }
+      : { kind: 'err', text: e.message };
+    renderMain();
+  } finally { S.sending = false; if ($.sendBtn) $.sendBtn.disabled = false; }
+}
+async function stopTurn() { try { await api('/api/conversation/stop', { key: S.conv.key }); } catch (e) { fail(e); } }
+
+// ------------------------------------------------------------------ memory files
+async function openFolderMemory(folder, kind) {
+  try { const r = await api('/api/memory/folder', { folder }); openMemoryEditor(r[kind], `${t(kind === 'context' ? 'folderContext' : 'folderInstructions')} — ${folder.split(/[\\/]/).filter(Boolean).pop()}`); }
+  catch (e) { fail(e); }
+}
+async function openMemoryEditor(file, title) {
+  let cur;
+  try { cur = await api('/api/memory' + q({ file })); } catch (e) { fail(e); return; }
+  const ta = h('textarea', { class: 'editor', spellcheck: 'false' }); ta.value = cur.content;
+  const status = h('span', { class: 'help', style: { marginRight: 'auto', alignSelf: 'center' } }, file);
+  const save = async () => {
+    try { cur = await api('/api/memory', { file, content: ta.value, version: cur.version }); toast(t('saved')); m.close(); if (S.conv) refreshMemoryInfo(); }
+    catch (e) { if (e.status === 409) { status.textContent = t('conflict'); status.style.color = 'var(--danger)'; } else fail(e); }
+  };
+  const reload = async () => { cur = await api('/api/memory' + q({ file })); ta.value = cur.content; status.textContent = file; status.style.color = ''; };
+  const m = modal({ title, cls: 'wide', body: ta, foot: [status, h('button', { class: 'btn', onclick: reload, html: icon('refresh') + t('reload') }), h('button', { class: 'btn', onclick: () => m.close() }, t('cancel')), h('button', { class: 'btn primary', onclick: save }, t('save'))] });
+  ta.addEventListener('keydown', (e) => { if ((e.ctrlKey || e.metaKey) && e.key === 's') { e.preventDefault(); save(); } });
+}
+async function refreshMemoryInfo() { try { const d = await api('/api/conversation' + q({ key: S.conv.key })); S.conv.memory = d.memory; S.conv.record = d.record; } catch { /* */ } }
+
+async function openLinkDialog() {
+  let cat;
+  try { cat = await api('/api/memory/catalog'); } catch (e) { fail(e); return; }
+  const own = new Set([S.conv.memory?.conversation?.context, S.conv.memory?.conversation?.instructions, S.conv.memory?.folder?.context, S.conv.memory?.folder?.instructions].filter(Boolean));
+  const linked = new Set((S.conv.memory?.links || []).map((l) => l.file));
+  const boxes = [];
+  const list = h('div', { class: 'list' }, ...cat.filter((c) => !own.has(c.file)).map((c) => {
+    const cb = h('input', { type: 'checkbox', checked: linked.has(c.file) }); boxes.push([cb, c]);
+    return h('label', { class: 'li check', style: { margin: 0 } }, cb, h('div', { class: 'grow' }, h('div', {}, c.label), h('div', { class: 'sub' }, c.folder)), h('span', { class: 'badge', html: icon(c.group === 'folder' ? 'folder' : 'chat') }));
+  }));
+  const m = modal({ title: t('linkContexts'), cls: 'mid', body: h('div', {}, h('p', { class: 'help' }, t('linkHelp')), cat.length ? list : h('p', {}, '—')),
+    foot: [h('button', { class: 'btn', onclick: () => m.close() }, t('cancel')), h('button', { class: 'btn primary', onclick: async () => {
+      const links = boxes.filter(([cb]) => cb.checked).map(([, c]) => ({ label: c.label, file: c.file }));
+      try { await api('/api/conversation/options', { key: S.conv.key, links }); await refreshMemoryInfo(); m.close(); renderMain(); } catch (e) { fail(e); }
+    } }, t('apply'))] });
+}
+
+// ------------------------------------------------------------------ git
+function gitTarget() { return S.conv ? { key: S.conv.key } : S.selFolder ? { folder: S.selFolder } : null; }
+function toggleGit() { if (settings().gitPanelOpen) { patchSettings({ gitPanelOpen: false }); $.gitp.classList.add('hidden'); } else openGit(); }
+function openGit() { patchSettings({ gitPanelOpen: true }); $.gitp.classList.remove('hidden'); loadGit(); }
+async function loadGit() {
+  const tgt = gitTarget();
+  if (!tgt) { renderGit(); return; }
+  try { S.git.st = await api('/api/git/status', tgt); } catch (e) { S.git.st = { repo: false, error: e.message }; }
+  renderGit();
+}
+async function gitOp(op, args = {}) {
+  const tgt = gitTarget(); if (!tgt) return;
+  S.git.busy = true; renderGit();
+  try {
+    const r = await api('/api/git/op', { ...tgt, op, args });
+    S.git.out = `$ git ${op}\n${r.output || (r.ok ? 'OK' : '')}${r.hint ? '\n\n' + r.hint : ''}`;
+    if (!r.ok) toast(r.hint || r.output.split('\n').slice(-2).join('\n') || 'git failed', true); else toast(`git ${op} ✓`);
+  } catch (e) { S.git.out = e.message; fail(e); }
+  S.git.busy = false;
+  await loadGit();
+  if (S.conv) { const gb = document.querySelector('.gitbar .lbl'); if (gb && S.git.st?.branch) gb.innerHTML = icon('branch') + esc(S.git.st.branch); }
+}
+async function gitPR() {
+  const tgt = gitTarget(); if (!tgt) return;
+  const target = await ask({ title: t('pr'), label: 'Target branch', value: S.sum.tools.bitbucket.defaultBranch || 'main' });
+  if (target == null) return;
+  try { const r = await api('/api/git/pr', { ...tgt, target }); S.git.out = r.url; toast(r.url); } catch (e) { fail(e); }
+}
+async function gitBranchCreate() { const v = await ask({ title: t('newBranch'), label: t('name'), value: 'feature/' }); if (v) gitOp('branch-create', { branch: v }); }
+async function gitPickBranch(op) {
+  const tgt = gitTarget(); if (!tgt) return;
+  if (!S.git.st) await loadGit();
+  const branches = (S.git.st?.branches || []).filter((b) => !b.current);
+  if (!branches.length) { const v = await ask({ title: t(op), label: t('branch') }); if (v) gitOp(op, { branch: v }); return; }
+  showMenu(document.querySelector('.gitbar') || $.top, branches.map((b) => ({ label: `${t(op === 'switch' ? 'switchBranch' : op)} ← ${b.name}`, icon: b.remote ? 'globe' : 'branch', run: () => gitOp(op, { branch: b.name }) })));
+}
+async function gitLog() {
+  const tgt = gitTarget(); if (!tgt) return;
+  try {
+    const r = await api('/api/git/log', { ...tgt, n: 50 });
+    modal({ title: t('log'), cls: 'mid', body: h('div', { class: 'list' }, ...r.log.map((c) => h('div', { class: 'li' }, h('code', {}, c.hash), h('div', { class: 'grow' }, h('div', {}, c.subject), h('div', { class: 'sub' }, `${c.author} · ${c.date}${c.refs ? ' · ' + c.refs : ''}`)), h('button', { class: 'btn small', onclick: async () => { if (await confirmBox({ title: 'Revert', text: `${c.hash} ${c.subject}` })) gitOp('revert', { commit: c.hash }); } }, 'Revert')))) });
+  } catch (e) { fail(e); }
+}
+
+function renderGit() {
+  const open = !!settings().gitPanelOpen;
+  $.gitp.classList.toggle('hidden', !open);
+  if (!open) return;
+  const st = S.git.st;
+  const head = h('div', { class: 'gp-head' }, h('h3', { html: icon('branch') + esc(t('gitPanel')) }), ib('refresh', t('refresh'), loadGit), ib('close', t('close'), toggleGit));
+  const body = h('div', { class: 'gp-body' });
+  if (!gitTarget()) body.append(h('p', { class: 'help' }, t('welcomeText')));
+  else if (!st) body.append(h('p', { class: 'help' }, '…'));
+  else if (!st.repo) body.append(h('p', {}, st.hint || t('notRepo')), st.error && !/not a git repository/i.test(st.error) ? h('pre', { class: 'gp-out' }, st.error) : null, h('button', { class: 'btn primary', onclick: () => gitOp('init') }, t('initRepo')));
+  else {
+    const remote = st.remotes?.[0];
+    body.append(h('div', { class: 'gp-branch' }, icon('branch') ? h('span', { html: icon('branch') }) : null, h('strong', {}, st.branch || '(detached)'),
+      st.upstream ? h('span', { class: 'badge' }, st.upstream) : null,
+      st.ahead ? h('span', { class: 'badge' }, `↑${st.ahead} ${t('ahead')}`) : null,
+      st.behind ? h('span', { class: 'badge' }, `↓${st.behind} ${t('behind')}`) : null));
+    if (remote) body.append(h('div', { class: 'help' }, `${remote.name}: ${remote.url}`));
+    if (st.state) body.append(h('div', { class: 'state-banner' }, h('strong', {}, st.state), ...(st.state === 'rebase' ? [
+      h('button', { class: 'btn small', onclick: () => gitOp('rebase-continue') }, t('continue')), h('button', { class: 'btn small', onclick: () => gitOp('rebase-skip') }, t('skip')), h('button', { class: 'btn small danger', onclick: () => gitOp('rebase-abort') }, t('abort'))]
+      : st.state === 'merge' ? [h('button', { class: 'btn small danger', onclick: () => gitOp('merge-abort') }, t('abort'))] : [])));
+    // changes
+    body.append(h('div', { class: 'gp-section' }, `${t('changes')} (${st.files.length})`));
+    if (!st.files.length) body.append(h('div', { class: 'help' }, t('noChanges')));
+    else {
+      const files = h('div', { class: 'gp-files' }, ...st.files.map((f) => {
+        const code = f.conflict ? 'U' : f.untracked ? '?' : (f.index !== '.' ? f.index : f.worktree);
+        const cb = h('input', { type: 'checkbox', checked: S.git.sel.has(f.path), onchange: (e) => { if (e.target.checked) S.git.sel.add(f.path); else S.git.sel.delete(f.path); const cbtn = document.getElementById('gp-commit'); if (cbtn) cbtn.innerHTML = icon('commit') + esc(t('commit')) + (S.git.sel.size ? ` (${S.git.sel.size})` : ''); } });
+        return h('div', { class: 'gp-file', title: f.path, ondblclick: () => showDiff(f) }, cb, h('span', { class: `st ${code}` }, code), h('span', { class: 'fp' }, f.path), f.staged ? h('span', { class: 'badge' }, 'S') : null);
+      }));
+      const sel = () => [...S.git.sel].filter((p) => st.files.some((f) => f.path === p));
+      body.append(files, h('div', { style: { display: 'flex', gap: '5px', flexWrap: 'wrap' } },
+        h('button', { class: 'btn small', onclick: () => { st.files.forEach((f) => S.git.sel.add(f.path)); renderGit(); } }, '☑'),
+        h('button', { class: 'btn small', onclick: () => { S.git.sel.clear(); renderGit(); } }, '☐'),
+        h('button', { class: 'btn small', onclick: () => gitOp('stage', { files: sel() }) }, t('stage')),
+        h('button', { class: 'btn small', onclick: () => gitOp('unstage', { files: sel() }) }, t('unstage')),
+        h('button', { class: 'btn small danger', onclick: async () => { const f = sel(); if (f.length && await confirmBox({ title: t('discard'), text: f.join('\n'), danger: true, okLabel: t('discard') })) gitOp('discard', { files: f }); } }, t('discard'))));
+      const msg = h('textarea', { id: 'gp-msg', class: 'input', rows: 3, placeholder: t('commitMessage'), style: { height: 'auto', padding: '7px 9px' }, oninput: (e) => { S.git.msg = e.target.value; } }); msg.value = S.git.msg;
+      body.append(msg, h('button', { id: 'gp-commit', class: 'btn primary', disabled: S.git.busy, onclick: async () => {
+        const files = sel();
+        await gitOp('commit', { message: S.git.msg, files, includeStaged: !files.length });
+        if (!S.git.out.includes('error') && !S.git.out.includes('fatal')) { S.git.msg = ''; S.git.sel.clear(); renderGit(); }
+      }, html: icon('commit') + t('commit') + (S.git.sel.size ? ` (${S.git.sel.size})` : '') }));
+    }
+    // actions
+    const a = (iconName, label, fn) => h('button', { class: 'btn', onclick: fn, disabled: S.git.busy, html: icon(iconName) + `<span>${esc(label)}</span>` });
+    body.append(h('div', { class: 'gp-section' }, t('remote')), h('div', { class: 'gp-grid' },
+      a('fetch', t('fetch'), () => gitOp('fetch')), a('pull', t('pull'), () => gitOp('pull')), a('rebase', t('pullRebase'), () => gitOp('pull', { rebase: true })),
+      a('push', t('push'), () => gitOp('push')), a('pr', t('pr'), () => gitPR()), a('plus', t('addRemote'), async () => { const u = await ask({ title: t('addRemote'), label: 'URL', help: 'git@bitbucket.org:team/repo.git' }); if (u) gitOp('remote-add', { name: st.remotes?.length ? 'upstream' : 'origin', url: u }); })));
+    body.append(h('div', { class: 'gp-section' }, t('branch')), h('div', { class: 'gp-grid' },
+      a('branch', t('newBranch'), gitBranchCreate), a('chevron', t('switchBranch'), () => gitPickBranch('switch')), a('merge', t('merge'), () => gitPickBranch('merge')),
+      a('rebase', t('rebase'), () => gitPickBranch('rebase')), a('trash', t('deleteBranch'), () => gitPickBranch('branch-delete')), a('tag', t('tag'), async () => { const v = await ask({ title: t('tag'), label: t('name'), value: 'v' }); if (v) gitOp('tag', { tag: v }); })));
+    body.append(h('div', { class: 'gp-section' }, t('stash')), h('div', { class: 'gp-grid' },
+      a('stash', t('stash'), async () => { const v = await ask({ title: t('stash'), label: t('commitMessage') }); if (v != null) gitOp('stash', { message: v }); }),
+      a('restore', t('stashPop'), () => gitOp('stash-pop')), a('list', t('stashList'), () => gitOp('stash-list')),
+      a('history', t('log'), gitLog)));
+  }
+  if (S.git.out) body.append(h('pre', { class: 'gp-out' }, S.git.out));
+  $.gitp.replaceChildren(head, body);
+}
+async function showDiff(f) {
+  const tgt = gitTarget();
+  try { const r = await api('/api/git/diff', { ...tgt, file: f.path, staged: f.staged && f.worktree === '.' }); modal({ title: f.path, cls: 'wide', body: h('pre', { class: 'codeblock', html: diffHtml(r.diff || '(no textual diff — new or binary file)') }) }); } catch (e) { fail(e); }
+}
+
+// ------------------------------------------------------------------ Jira
+async function jiraAction() {
+  const keyv = await ask({ title: 'Jira', label: 'Issue key (e.g. PROJ-123)', validate: (v) => (/^[A-Z][A-Z0-9_]+-\d+$/.test(v) ? null : 'PROJ-123') });
+  if (!keyv) return;
+  if (!S.conv) { toast(t('newChat'), true); return; }
+  $.input.value = `${$.input.value ? $.input.value + '\n\n' : ''}Using the Jira tools, fetch issue ${keyv}: summarise its status, description, acceptance criteria and open sub-tasks, then propose next steps for this folder.`;
+  $.input.dispatchEvent(new Event('input')); $.input.focus();
+}
+
+// ------------------------------------------------------------------ settings dialog
+async function openSettings(tab = 'general', focusTool) {
+  const tabs = [['general', 'gear'], ['models', 'cpu'], ['keys', 'key'], ['agents', 'bot'], ['tools', 'tool'], ['skills', 'puzzle'], ['configToml', 'fileText'], ['about', 'info']];
+  const nav = h('nav');
+  const section = h('section');
+  const show = async (name) => {
+    nav.querySelectorAll('button').forEach((b) => b.classList.toggle('on', b.dataset.tab === name));
+    section.replaceChildren(h('p', { class: 'help' }, '…'));
+    try { section.replaceChildren(...[].concat(await SETTINGS[name](focusTool))); } catch (e) { section.replaceChildren(h('div', { class: 'errorbox' }, e.message)); }
+  };
+  for (const [name, ic] of tabs) nav.append(h('button', { 'data-tab': name, onclick: () => show(name), html: icon(ic) + `<span>${esc(t(name))}</span>` }));
+  // Single instance: re-opening (e.g. after an action inside a tab) replaces the dialog instead of stacking it.
+  if (S.settingsModal) { const prev = S.settingsModal; S.settingsModal = null; prev.close(); }
+  const m = modal({ title: t('configuration'), cls: 'wide', body: h('div', { class: 'settings' }, nav, section), onClose: () => { if (S.settingsModal === m) { S.settingsModal = null; loadState(); } } });
+  S.settingsModal = m;
+  show(tab);
+}
+
+const field = (label, input, help) => h('label', { class: 'field' }, h('span', {}, label), input, help ? h('div', { class: 'help' }, help) : null);
+const checkbox = (label, checked, onchange) => h('label', { class: 'check' }, h('input', { type: 'checkbox', checked, onchange: (e) => onchange(e.target.checked) }), h('span', {}, label));
+const sw = (checked, onchange, tip) => h('label', { class: 'switch', 'data-tip': tip }, h('input', { type: 'checkbox', checked, onchange: (e) => onchange(e.target.checked) }), h('span'));
+const select = (opts, value, onchange) => h('select', { class: 'input', onchange: (e) => onchange(e.target.value) }, ...opts.map(([v, l]) => h('option', { value: v, selected: v === value }, l)));
+const input = (value, onchange, attrs = {}) => h('input', { class: 'input', value: value ?? '', spellcheck: 'false', onchange: (e) => onchange(e.target.value), ...attrs });
+function readFileAsText(accept) {
+  return new Promise((resolve) => {
+    const inp = h('input', { type: 'file', accept, style: { display: 'none' } });
+    inp.onchange = () => { const f = inp.files[0]; if (!f) return resolve(null); const r = new FileReader(); r.onload = () => resolve({ name: f.name, text: r.result }); r.readAsText(f); };
+    document.body.append(inp); inp.click(); setTimeout(() => inp.remove(), 60_000);
+  });
+}
+
+const SETTINGS = {
+  general() {
+    const s = settings();
+    return [h('h3', {}, t('general')),
+      field(t('theme'), select([['system', t('system')], ['light', t('light')], ['dark', t('dark')]], s.theme || 'system', (v) => { patchSettings({ theme: v }, true); applyTheme(); renderTop(); })),
+      field(t('language'), select(Object.entries(LANGS).map(([k, v]) => [k, v.name]), getLang(), (v) => changeLang(v))),
+      field(t('defaultMode'), select((S.sum.actionModes || []).map((m) => [m, t('mode.' + m)]), s.defaultActionMode || 'ask', (v) => patchSettings({ defaultActionMode: v }, true)), t(`modeHelp.${s.defaultActionMode || 'ask'}`)),
+      field(t('openMode'), select([['app', t('openApp')], ['browser', t('openBrowser')]], s.openMode || 'app', (v) => patchSettings({ openMode: v }, true))),
+      checkbox(t('syncConfig'), s.syncConfig !== false, (v) => patchSettings({ syncConfig: v }, true)),
+      checkbox(t('transcriptCopy'), s.transcriptCopy !== false, (v) => patchSettings({ transcriptCopy: v }, true))];
+  },
+
+  models() {
+    const wrap = h('div');
+    const draw = () => {
+      const list = S.sum.models;
+      wrap.replaceChildren(h('h3', {}, t('models')),
+        h('div', { class: 'list' }, ...list.map((m) => h('div', { class: 'li' }, h('span', { html: icon(m.agent === 'claude' ? 'bot' : 'cpu') }),
+          h('div', { class: 'grow' }, h('div', {}, m.label, m.isDefault ? h('span', { class: 'badge', style: { marginLeft: '6px' } }, 'default') : null), h('div', { class: 'sub' }, `${m.agent} · ${m.model}${m.provider ? ' · ' + m.provider : ''} · ${(m.efforts || []).map(effortLabel).join(', ')}`)),
+          h('button', { class: 'btn small', onclick: () => api('/api/models/remove', { key: m.key }).then(reload).catch(fail) }, t('remove'))))),
+        h('div', { class: 'inline', style: { marginTop: '10px' } },
+          h('button', { class: 'btn', html: icon('upload') + t('importToml'), onclick: async () => {
+            const f = await readFileAsText('.toml'); if (!f) return;
+            const label = await ask({ title: t('importToml'), label: t('name'), value: f.name.replace(/\.toml$/i, '') });
+            if (label == null) return;
+            try {
+              const r = await api('/api/models/import', { text: f.text, label });
+              if (r.dropped?.length) toast(`Secrets removed from the profile: ${r.dropped.join(', ')}. Save them under ${t('keys')}.`);
+              if (r.envKey && !r.envKeySaved) toast(`${r.envKey}: ${t('saveKey')} → ${t('keys')}`);
+              reload();
+            } catch (e) { fail(e); }
+          } }),
+          h('button', { class: 'btn', html: icon('plus') + t('addModel'), onclick: addModelDialog }),
+          S.sum.models && h('button', { class: 'btn', html: icon('eye') + t('restoreModels'), onclick: () => api('/api/models/restore', {}).then(reload).catch(fail) })));
+    };
+    const reload = async () => { await loadState(false); draw(); };
+    draw();
+    return wrap;
+  },
+
+  async keys() {
+    const r = await api('/api/secrets');
+    const name = h('input', { class: 'input', placeholder: 'AZURE_OPENAI_API_KEY', spellcheck: 'false', autocomplete: 'off' });
+    const value = h('input', { class: 'input', type: 'password', autocomplete: 'new-password' });
+    return [h('h3', {}, t('keys')), h('p', { class: 'help' }, t('keysHelp', { protection: r.protection })),
+      r.backend === 'file' ? h('div', { class: 'banner warn' }, h('span', { html: icon('warn') }), h('span', {}, r.protection)) : null,
+      h('div', { class: 'list' }, ...(r.secrets.length ? r.secrets.map((s) => h('div', { class: 'li' }, h('span', { html: icon('key') }), h('div', { class: 'grow' }, h('code', {}, s.name), h('div', { class: 'sub' }, `${s.description || ''} ${fmtTime(s.updatedAt)}`)), h('button', { class: 'btn small danger', onclick: () => api('/api/secrets/remove', { name: s.name }).then(() => openSettings('keys')).catch(fail) }, t('remove')))) : [h('div', { class: 'li help' }, '—')])),
+      h('div', { class: 'inline', style: { marginTop: '8px' } }, field(t('keyName'), name), field(t('keyValue'), value),
+        h('button', { class: 'btn primary', style: { marginBottom: '4px' }, onclick: async () => {
+          try { await api('/api/secrets/set', { name: name.value.trim().toUpperCase(), value: value.value }); value.value = ''; toast(t('saved')); await api('/api/agent/restart', { agent: 'codex' }).catch(() => {}); openSettings('keys'); } catch (e) { fail(e); }
+        } }, t('saveKey')))];
+  },
+
+  agents() {
+    const s = settings();
+    const bins = { ...(s.agentBins || {}) };
+    return [h('h3', {}, t('agents')), h('div', { class: 'cards' }, ...Object.entries(S.sum.agents).map(([id, a]) => h('div', { class: 'card' },
+      h('div', { class: 'card-head', html: icon(id === 'codex' ? 'terminal' : 'bot') + `<h4>${esc(a.label)}</h4><span class="agent-pill"><span class="dot ${a.state}"></span>${esc(t(a.state) || a.state)}</span>` }),
+      a.error ? h('div', { class: 'help', style: { color: 'var(--danger)' } }, a.error) : null,
+      a.version ? h('div', { class: 'help' }, `v${a.version}${a.codexHome ? ' · ' + a.codexHome : ''}`) : null,
+      field(t('agentPath'), input(bins[id] || '', (v) => { bins[id] = v; patchSettings({ agentBins: bins }, true); }, { placeholder: id === 'codex' ? 'codex' : 'claude' })),
+      id === 'codex' ? h('div', { class: 'inline' }, h('button', { class: 'btn', onclick: reconnect, html: icon('refresh') + t('reconnect') }), h('button', { class: 'btn', onclick: () => api('/api/agent/stop', { agent: 'codex' }).then(loadState).catch(fail), html: icon('stop') + t('quitAgent') })) : null,
+      id === 'codex' ? checkPanel('codex') : null)))];
+  },
+
+  async tools(focus) {
+    const info = await api('/api/tools/info');
+    const T = S.sum.tools;
+    const upd = (tool, patch) => api('/api/tools', { tool, patch }).then((r) => { S.sum.tools = r.tools; (r.warnings || []).forEach((w) => toast(w)); renderTop(); }).catch(fail);
+    const card = async (id, title, help, ...content) => h('div', { class: 'card', id: `card-${id}`, style: focus === id ? { borderColor: 'var(--accent)' } : null },
+      h('div', { class: 'card-head', html: (await toolIcon(id)) + `<h4>${esc(title)}</h4>` }, sw(T[id].enabled, (v) => upd(id, { enabled: v }), t('enabled'))),
+      h('p', { class: 'help' }, help), ...content, checkPanel(id));
+    const jira = T.jira;
+    const jmode = h('select', { class: 'input' }, h('option', { value: 'remote', selected: jira.mode !== 'local' }, t('jiraRemote')), h('option', { value: 'local', selected: jira.mode === 'local' }, t('jiraLocal')));
+    const jurl = input(jira.url, () => {}, { placeholder: 'https://…/mcp' });
+    const jauth = h('select', { class: 'input' }, h('option', { value: 'oauth', selected: jira.auth !== 'bearer' }, t('authOauth')), h('option', { value: 'bearer', selected: jira.auth === 'bearer' }, t('authBearer')));
+    const jtok = h('input', { class: 'input', type: 'password', autocomplete: 'new-password', placeholder: '••••' });
+    const jsite = input(jira.site, () => {}, { placeholder: 'https://company.atlassian.net' });
+    const jmail = input(jira.email, () => {});
+    const jcmd = input(jira.command || 'uvx', () => {});
+    const jargs = input(Array.isArray(jira.args) ? jira.args.join(' ') : (jira.args || 'mcp-atlassian'), () => {});
+    const remoteBox = h('div', {}, field(t('endpoint'), jurl), field('Auth', jauth));
+    const localBox = h('div', {}, field(t('site'), jsite), field(t('email'), jmail), h('div', { class: 'inline' }, field(t('commandLine'), jcmd), field(t('args'), jargs)));
+    const syncJ = () => { remoteBox.classList.toggle('hidden', jmode.value !== 'remote'); localBox.classList.toggle('hidden', jmode.value !== 'local'); };
+    jmode.onchange = syncJ; syncJ();
+    const matlabRel = select([['', t('autodetect')], ...info.matlab.installs.map((i) => [i.release, `${i.release} — ${i.exe}`])], T.matlab.release || '', (v) => upd('matlab', { release: v }));
+    return [h('h3', {}, t('tools')), h('div', { class: 'cards' },
+      await card('vscode', 'VS Code', t('vscodeHelp'),
+        h('div', { class: 'help' }, info.vscode.found ? `✓ ${info.vscode.found}` : '✕ not found'),
+        field(t('path'), input(T.vscode.command, (v) => upd('vscode', { command: v }), { placeholder: 'Code.exe / code' }))),
+      await card('matlab', 'MATLAB', t('matlabHelp'),
+        field(t('release'), matlabRel),
+        field(t('path'), input(T.matlab.executable, (v) => upd('matlab', { executable: v }), { placeholder: 'C:\\Program Files\\MATLAB\\R2026a\\bin\\matlab.exe' })),
+        checkbox(t('initSimulink'), T.matlab.initSimulink, (v) => upd('matlab', { initSimulink: v })),
+        checkbox(t('shareSession'), T.matlab.shareSession !== false, (v) => upd('matlab', { shareSession: v })),
+        field('MCP server name', input(T.matlab.mcpServer, (v) => upd('matlab', { mcpServer: v }))),
+        h('button', { class: 'btn', onclick: () => { const f = S.conv?.record?.cwd || S.selFolder; if (!f) return toast(t('openFolder'), true); api('/api/tools/matlab', { folder: f, setup: true }).then((r) => toast(`MATLAB ${r.release}`)).catch(fail); } }, t('runSetup'))),
+      await card('git', 'Git', t('gitHelp'), h('div', { class: 'help' }, info.git.available ? '✓ git' : '✕ git not found'), field(t('path'), input(T.git.executable, (v) => upd('git', { executable: v }), { placeholder: 'git' }))),
+      await card('bitbucket', 'Bitbucket', t('bitbucketHelp'),
+        field('Type', select([['cloud', t('flavorCloud')], ['server', t('flavorServer')]], T.bitbucket.flavor, (v) => upd('bitbucket', { flavor: v }))),
+        field(t('baseUrl'), input(T.bitbucket.baseUrl, (v) => upd('bitbucket', { baseUrl: v }))),
+        field(t('defaultBranch'), input(T.bitbucket.defaultBranch, (v) => upd('bitbucket', { defaultBranch: v }), { placeholder: 'main' })),
+        h('div', { class: 'hint' }, 'SSH: ssh-keygen -t ed25519 -C "you@example.com" → add ~/.ssh/id_ed25519.pub to Bitbucket › Personal settings › SSH keys → ssh -T git@bitbucket.org')),
+      await card('jira', 'Jira', t('jiraHelp'),
+        field('Mode', jmode), remoteBox, localBox, field(t('token'), jtok),
+        h('div', { class: 'inline' },
+          h('button', { class: 'btn primary', onclick: async () => {
+            try {
+              const r = await api('/api/jira/configure', { mode: jmode.value, url: jurl.value, auth: jauth.value, token: jtok.value || undefined, site: jsite.value, email: jmail.value, command: jcmd.value, args: jargs.value });
+              jtok.value = ''; toast(t('saved'));
+              if (r.needsLogin) { await api('/api/jira/login', {}).catch(fail); }
+              await loadState(false); renderTop();
+            } catch (e) { fail(e); }
+          } }, t('save')),
+          h('button', { class: 'btn', onclick: () => api('/api/jira/login', {}).then(() => toast(t('signIn'))).catch(fail) }, t('signIn'))),
+        h('details', {}, h('summary', { class: 'help', style: { cursor: 'pointer' } }, t('askManager')), h('div', { class: 'hint' }, t('jiraChecklist')), h('button', { class: 'btn small', style: { marginTop: '6px' }, onclick: () => copyText(t('jiraChecklist')), html: icon('copy') + t('copyPath').split(' ')[0] }))))];
+  },
+
+  async skills() {
+    const folder = S.conv?.record?.cwd || S.selFolder || '';
+    const [sk, pl] = await Promise.all([api('/api/skills' + q({ folder })).catch((e) => ({ skills: [], error: e.message })), api('/api/plugins').catch((e) => ({ marketplaces: [], error: e.message }))]);
+    const src = h('input', { class: 'input', placeholder: 'https://github.com/owner/repo/tree/main/skills/name · owner/repo · C:\\path\\to\\skill', spellcheck: 'false' });
+    const scope = select([['global', t('scopeGlobal')], ['folder', `${t('scopeFolder')}${folder ? ' — ' + folder : ''}`]], 'global', () => {});
+    const replace = h('input', { type: 'checkbox' });
+    const out = h('div');
+    const mkt = h('input', { class: 'input', placeholder: 'owner/repo', spellcheck: 'false' });
+    return [h('h3', {}, t('skills')),
+      field(t('installFrom'), src), field(t('scope'), scope), h('label', { class: 'check' }, replace, h('span', {}, 'Replace existing (a backup is kept)')),
+      h('button', { class: 'btn primary', onclick: async (e) => {
+        e.currentTarget.disabled = true;
+        try {
+          const r = await api('/api/skills/install', { source: src.value, scope: scope.value, folder, replace: replace.checked });
+          if (r.kind === 'plugin') { mkt.value = r.source; toast(r.message); }
+          else out.replaceChildren(h('div', { class: 'list' }, ...r.results.map((x) => h('div', { class: 'li' }, h('span', {}, x.status === 'installed' ? '✓' : '•'), h('div', { class: 'grow' }, h('div', {}, x.name), h('div', { class: 'sub' }, x.path)), h('span', { class: 'badge' }, x.status)))));
+        } catch (err) { fail(err); }
+        e.currentTarget.disabled = false;
+      } }, t('install')), out,
+      h('h3', { style: { marginTop: '18px' } }, `Skills (${sk.skills.length})`),
+      sk.error ? h('div', { class: 'help' }, sk.error) : null,
+      h('div', { class: 'list' }, ...sk.skills.map((s) => h('div', { class: 'li' }, h('span', { html: icon('puzzle') }), h('div', { class: 'grow' }, h('div', {}, s.name), h('div', { class: 'sub' }, s.description || s.path)), h('span', { class: 'badge' }, s.scope)))),
+      h('h3', { style: { marginTop: '18px' } }, 'Plugins'),
+      h('div', { class: 'inline' }, field(t('addMarketplace'), mkt), h('button', { class: 'btn', style: { marginBottom: '4px' }, onclick: () => api('/api/plugins/marketplace', { source: mkt.value }).then(() => openSettings('skills')).catch(fail) }, t('add'))),
+      pl.error ? h('div', { class: 'help' }, pl.error) : null,
+      ...pl.marketplaces.map((m) => pluginBlock(m))];
+  },
+
+  async configToml() {
+    const c = await api('/api/config').catch((e) => ({ error: e.message }));
+    return [h('h3', {}, 'config.toml'), c.error ? h('div', { class: 'errorbox' }, c.error) : h('div', { class: 'list' },
+      ...[['File', c.file], [t('model'), c.model], ['Provider', c.provider], [t('effort'), c.effort], ['Approval', c.approvalPolicy], ['Sandbox', c.sandbox], ['MCP', (c.mcpServers || []).map((m) => `${m.enabled ? '●' : '○'} ${m.name}`).join('   ')]].map(([k, v]) => h('div', { class: 'li' }, h('div', { style: { width: '110px', color: 'var(--muted)' } }, k), h('div', { class: 'grow' }, h('code', {}, v ?? '—'))))),
+      h('p', { class: 'help', style: { marginTop: '12px' } }, t('loadTomlHelp')),
+      h('button', { class: 'btn', html: icon('upload') + t('loadToml'), onclick: async () => {
+        const f = await readFileAsText('.toml'); if (!f) return;
+        if (!await confirmBox({ title: t('loadToml'), text: `${f.name} → ${c.file}` })) return;
+        try { const r = await api('/api/config/load', { text: f.text }); toast(`${t('saved')}${r.backup ? ' · backup: ' + r.backup : ''}`); if (r.inlineSecretWarnings?.length) toast(`Literal secrets in: ${r.inlineSecretWarnings.join(', ')} — prefer ${t('keys')}.`, true); openSettings('configToml'); } catch (e) { fail(e); }
+      } })];
+  },
+
+  async about() {
+    const b = S.sum.brand;
+    const a = await api('/api/about');
+    const upd = h('div', { class: 'help' });
+    const rows = [[t('version'), a.app], ['Node.js', a.node], ['Codex', a.codex || '—'], ['OS', a.platform], ['Git', a.git ? `${a.git.branch} · ${a.git.head}` : '—'], ['Data', a.dataDir], ['CODEX_HOME', a.codexHome]];
+    return [h('h3', {}, b.name), h('p', { class: 'help' }, `${b.author} · ${b.copyright}`),
+      h('div', { class: 'list' }, ...rows.map(([k, v]) => h('div', { class: 'li' }, h('div', { style: { width: '110px', color: 'var(--muted)' } }, k), h('div', { class: 'grow' }, h('code', {}, v))))),
+      h('div', { class: 'inline', style: { marginTop: '10px' } },
+        h('button', { class: 'btn', html: icon('download') + t('checkUpdates'), onclick: async () => { upd.textContent = '…'; try { const r = await api('/api/about/updates', {}); upd.replaceChildren(!r.supported ? r.message : r.error ? r.error : r.behind ? h('div', {}, t('updateAvailable', { n: r.behind }), h('pre', { class: 'codeblock' }, r.commits.join('\n')), h('code', {}, r.command)) : t('upToDate')); } catch (e) { upd.textContent = e.message; } } }),
+        h('button', { class: 'btn', html: icon('download') + t('exportDiagnostics'), onclick: async () => {
+          try { const d = await api('/api/diagnostics'); const blob = new Blob([JSON.stringify(d, null, 2)], { type: 'application/json' }); const url = URL.createObjectURL(blob); const link = h('a', { href: url, download: `cpm-diagnostics-${new Date().toISOString().slice(0, 10)}.json` }); document.body.append(link); link.click(); link.remove(); setTimeout(() => URL.revokeObjectURL(url), 5000); } catch (e) { fail(e); }
+        } })),
+      upd, h('p', { class: 'help' }, t('diagnosticsHelp')),
+      h('h3', {}, t('backups')),
+      h('button', { class: 'btn', html: icon('archive') + t('createBackup'), onclick: () => api('/api/backups/create', {}).then(() => openSettings('about')).catch(fail) }),
+      h('div', { class: 'list', style: { marginTop: '8px' } }, ...(a.backups.length ? a.backups.slice(0, 15).map((x) => h('div', { class: 'li' }, h('span', { html: icon('archive') }), h('div', { class: 'grow' }, h('div', {}, new Date(x.at).toLocaleString(getLang())), h('div', { class: 'sub' }, x.name)),
+        h('button', { class: 'btn small', onclick: async () => { if (await confirmBox({ title: t('restoreBackup'), text: x.name })) api('/api/backups/restore', { name: x.name }).then(() => { toast(t('saved')); loadState(true); }).catch(fail); } }, t('restoreBackup')))) : [h('div', { class: 'li help' }, '—')]))];
+  },
+};
+
+function pluginBlock(m) {
+  const row = (p) => h('div', { class: 'li' },
+    h('div', { class: 'grow' }, h('div', {}, p.name), h('div', { class: 'sub' }, p.description)),
+    p.installed ? h('span', { class: 'badge' }, '✓')
+      : h('button', { class: 'btn small', onclick: () => api('/api/plugins/install', { marketplacePath: m.path, pluginName: p.name }).then(() => openSettings('skills')).catch(fail) }, t('install')));
+  return h('div', { style: { marginTop: '8px' } }, h('div', { class: 'gp-section', style: { margin: '6px 0' } }, m.name), h('div', { class: 'list' }, ...m.plugins.map(row)));
+}
+
+/** "Test" button + results list for one integration (rec. 7). */
+function checkPanel(tool) {
+  const out = h('div', { class: 'checks' });
+  const btn = h('button', { class: 'btn small', html: icon('check') + t('testConnection'), onclick: async () => {
+    btn.disabled = true; out.replaceChildren(h('div', { class: 'help' }, t('checksRunning')));
+    try {
+      const r = await api('/api/tools/check' + q({ tool, folder: S.conv?.record?.cwd || S.selFolder || '' }));
+      out.replaceChildren(...r.checks.map((c) => h('div', { class: `check-row ${c.ok === true ? 'ok' : c.ok === false ? 'bad' : 'warn'}` },
+        h('span', { class: 'mark' }, c.ok === true ? '✓' : c.ok === false ? '✕' : '!'),
+        h('div', { class: 'grow' }, h('strong', {}, c.name), ' ', h('span', {}, c.detail || ''),
+          c.fix ? h('div', { class: 'fix' }, h('span', {}, `${t('fix')}: `), h('code', {}, c.fix), ' ', h('button', { class: 'copy', onclick: () => copyText(c.fix), html: icon('copy') })) : null))));
+    } catch (e) { out.replaceChildren(h('div', { class: 'errorbox' }, e.message)); }
+    btn.disabled = false;
+  } });
+  return h('div', { style: { marginTop: '10px' } }, btn, out);
+}
+
+// ------------------------------------------------------------------ onboarding (rec. 8)
+function openOnboarding() {
+  let step = 0;
+  const body = h('div'), foot = h('div', { style: { display: 'flex', gap: '8px', width: '100%' } });
+  const steps = [
+    () => [h('h3', {}, t('onbLang')), h('div', { class: 'inline' }, ...Object.entries(LANGS).map(([k, v]) => h('button', { class: `btn ${getLang() === k ? 'primary' : ''}`, html: FLAGS[k] + esc(v.name), onclick: () => { changeLang(k); draw(); } }))),
+      field(t('theme'), select([['system', t('system')], ['light', t('light')], ['dark', t('dark')]], settings().theme || 'system', (v) => { patchSettings({ theme: v }, true); applyTheme(); renderTop(); }))],
+    () => [h('h3', {}, t('onbAgent')), h('p', { class: 'help' }, t('setupCodex')), checkPanel('codex')],
+    () => [h('h3', {}, t('onbFolder')), h('p', { class: 'help' }, t('welcomeText')), h('button', { class: 'btn primary', html: icon('folderOpen') + t('openFolder'), onclick: openFolderFlow })],
+    () => [h('h3', {}, t('onbTools')), ...['vscode', 'matlab', 'git', 'bitbucket', 'jira'].map((id) => checkbox({ vscode: 'VS Code', matlab: 'MATLAB', git: 'Git', bitbucket: 'Bitbucket', jira: 'Jira' }[id], S.sum.tools[id].enabled, (v) => api('/api/tools', { tool: id, patch: { enabled: v } }).then((r) => { S.sum.tools = r.tools; renderTop(); }).catch(fail))), h('p', { class: 'help' }, t('onbDone'))],
+  ];
+  const draw = () => {
+    body.replaceChildren(h('div', { class: 'help' }, `${step + 1} / ${steps.length}`), ...steps[step]());
+    foot.replaceChildren(h('button', { class: 'btn', style: { marginRight: 'auto' }, onclick: () => finish() }, t('close')),
+      step ? h('button', { class: 'btn', onclick: () => { step--; draw(); } }, t('back')) : null,
+      step < steps.length - 1 ? h('button', { class: 'btn primary', onclick: () => { step++; draw(); } }, t('next')) : h('button', { class: 'btn primary', onclick: () => finish() }, t('finish')));
+  };
+  const finish = () => { patchSettings({ onboarded: true }, true); S.sum.onboarded = true; m.close(); };
+  const m = modal({ title: t('onboardingTitle'), cls: 'mid', body, foot, onClose: () => patchSettings({ onboarded: true }, true) });
+  draw();
+}
+
+async function addModelDialog() {
+  const agent = select([['codex', 'Codex'], ['claude', 'Claude Code']], 'codex', () => {});
+  const label = h('input', { class: 'input', placeholder: 'GPT-5.4 (Azure)' });
+  const model = h('input', { class: 'input', placeholder: 'gpt-5.4' });
+  const provider = h('input', { class: 'input', placeholder: 'openai / azure / …' });
+  const efforts = h('input', { class: 'input', value: 'low, medium, high, xhigh' });
+  const m = modal({ title: t('addModel'), body: h('div', {}, field(t('agent'), agent), field(t('name'), label), field(t('model'), model), field('model_provider', provider), field(t('effort'), efforts, 'comma-separated')),
+    foot: [h('button', { class: 'btn', onclick: () => m.close() }, t('cancel')), h('button', { class: 'btn primary', onclick: async () => {
+      try { await api('/api/models/add', { label: label.value, model: model.value, provider: provider.value, efforts: efforts.value.split(',').map((s) => s.trim()).filter(Boolean), agent: agent.value }); m.close(); await loadState(false); openSettings('models'); } catch (e) { fail(e); }
+    } }, t('add'))] });
+}
+
+// ------------------------------------------------------------------ live events
+let es = null, esRetry = 0;
+function connectEvents() {
+  es?.close();
+  es = new EventSource('/api/events?token=' + encodeURIComponent(TOKEN));
+  es.onopen = () => { const was = S.conn; S.conn = 'ok'; esRetry = 0; if (was === 'lost') { loadState(false); if (S.conv) openConversation(S.conv.key, { quiet: true }); } };
+  es.onerror = () => { esRetry++; if (esRetry >= 2 && S.conn !== 'lost') { S.conn = 'lost'; if (S.conv) renderMain(); } };
+  es.onmessage = (m) => { try { onEvent(JSON.parse(m.data)); } catch (e) { console.error(e); } };
+}
+
+let stateTimer;
+function softReload() { clearTimeout(stateTimer); stateTimer = setTimeout(() => loadState(false), 400); }
+
+function onEvent(e) {
+  const isActive = S.conv && e.key === S.conv.key;
+  switch (e.type) {
+    case 'agent.status': if (S.sum) {
+      const was = S.sum.agents[e.agent]?.state; S.sum.agents[e.agent] = e.status; renderTop();
+      const up = (st) => ['ready', 'idle'].includes(st);
+      if (!S.conv) renderMain();
+      else if (up(was) !== up(e.status.state)) { const c = document.querySelector('.composer'); if (c) { const keep = $.input?.value; c.replaceWith(renderComposer()); if (keep != null) $.input.value = keep; } }
+    } break;
+    case 'turn.started':
+      S.phase[e.key] = 'running';
+      if (isActive) { S.conv.running = true; renderMain(); }
+      markRunning(e.key, true); break;
+    case 'turn.ack': S.ack[e.key] = { model: e.model, effort: e.effort, provider: e.provider }; if (isActive) renderStatus(); break;
+    case 'usage': if (e.key) { S.usage[e.key] = e.usage; if (isActive) renderStatus(); } break;
+    case 'turn.completed':
+      S.phase[e.key] = e.status === 'failed' ? 'failed' : e.status === 'interrupted' ? 'interrupted' : 'completed';
+      S.turnsDone[e.key] = (S.turnsDone[e.key] || 0) + 1;
+      markRunning(e.key, false);
+      if (isActive) {
+        S.conv.running = false;
+        if (e.status === 'failed' && e.error) { S.conv.items.push({ id: 'err-' + Date.now(), kind: 'error', text: e.error }); }
+        renderMain();
+        setTimeout(async () => { if (S.conv?.key === e.key && !S.conv.running) { const d = await api('/api/conversation' + q({ key: e.key })).catch(() => null); if (d && S.conv?.key === e.key && !S.conv.running) { S.conv.items = d.items; S.itemIdx = new Map(d.items.map((i) => [i.id, i])); S.conv.record = d.record; S.conv.memory = d.memory; renderStream(); refreshHeader(); } } }, 600);
+        if (settings().gitPanelOpen) loadGit();
+      }
+      softReload(); break;
+    case 'item.started': case 'item.completed': if (isActive) upsertItem(e.item); break;
+    case 'item.delta': if (isActive) applyDelta(e.itemId, e.field, e.delta); break;
+    case 'approval.request': if (isActive) { S.conv.pending = [...(S.conv.pending || []).filter((p) => p.requestKey !== e.requestKey), e]; renderStream(); renderStatus(); } else toast(`${t('status.approval')} — ${convByKey().get(e.key)?.title || ''}`); break;
+    case 'approval.resolved': if (isActive && S.conv.pending?.some((p) => p.requestKey === e.requestKey)) { S.conv.pending = S.conv.pending.filter((p) => p.requestKey !== e.requestKey); renderStream(); renderStatus(); } break;
+    case 'error': if (isActive) toast(e.message, !e.willRetry); break;
+    case 'warning': toast(e.message); break;
+    case 'conversation.updated': softReload(); break;
+    case 'server.shutdown': showClosed(); break;
+    default: break;
+  }
+}
+function refreshHeader() { const h1 = $.main.querySelector('.conv-title h1'); if (h1 && S.conv) h1.textContent = S.conv.record.title || t('untitled'); }
+function markRunning(key, v) { const c = S.sum?.conversations.find((x) => x.key === key); if (c) { c.running = v; renderTree(); } }
+
+function showClosed() { es?.close(); document.body.append(h('div', { class: 'fullscreen-msg' }, h('div', {}, h('div', { class: 'mark', style: { margin: '0 auto 12px', width: '48px', height: '48px', borderRadius: '13px', background: 'var(--accent)', color: 'var(--on-accent)', display: 'grid', placeItems: 'center' }, html: icon('logo') }), h('p', {}, t('appClosed'))))); }
+
+// ------------------------------------------------------------------ load & render
+async function loadState(full = true) {
+  try { S.sum = await api('/api/state'); } catch (e) { if (e.status === 401) return noToken(); fail(e); return; }
+  setLogos(S.sum.logos);
+  if (full) { setLang(settings().lang || 'en'); applyTheme(); }
+  renderTop();
+  // Rebuild the Explorer only when what it shows changed (rec. 3).
+  const sig = JSON.stringify([S.sum.tree, S.sum.conversations.map((c) => [c.key, c.title, c.running, c.archived, Math.floor((c.updatedAt || 0) / 60000)]), S.sum.trash.length, getLang()]);
+  if (full || sig !== S.treeSig) { S.treeSig = sig; renderSidebar(); }
+  if (S.conv && !S.sum.conversations.some((c) => c.key === S.conv.key)) { S.conv = null; renderMain(); }
+  else if (!S.conv) renderMain();
+}
+async function afterChange() { await loadState(false); if (S.conv) { const k = S.conv.key; if (S.sum.conversations.some((c) => c.key === k)) await openConversation(k, { quiet: true }); else { S.conv = null; renderMain(); } } else renderMain(); }
+async function reconnect() { try { await api('/api/agent/restart', { agent: 'codex' }); toast(`Codex · ${t('ready')}`); S.banner = null; await loadState(false); if (S.conv) openConversation(S.conv.key, { quiet: true }); } catch (e) { fail(e); } }
+function renderAll() { renderTop(); renderSidebar(); renderMain(); renderGit(); }
+function noToken() { document.getElementById('app').replaceChildren(h('div', { class: 'fullscreen-msg' }, h('div', {}, h('h2', {}, 'Codex Projects Management'), h('p', {}, 'Open the app from its launcher. (The session token is missing or expired.)')))); }
+
+(async function main() {
+  if (!TOKEN) return noToken();
+  buildShell();
+  await loadState(true);
+  if (!S.sum) return;
+  const last = settings().activeConversation;
+  if (last && S.sum.conversations.some((c) => c.key === last)) await openConversation(last);
+  if (settings().gitPanelOpen) loadGit();
+  connectEvents();
+  if (!S.sum.onboarded) openOnboarding();
+  window.addEventListener('beforeunload', () => es?.close());
+  // Pick up conversations created elsewhere (e.g. in a terminal) with a cheap incremental refresh.
+  setInterval(() => { if (document.visibilityState === 'visible' && S.conn === 'ok') api('/api/refresh', { full: false }).then((r) => { if (r.changed) loadState(false); }).catch(() => {}); }, 60_000);
+})();

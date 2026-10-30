@@ -1,0 +1,9 @@
+node_modules/
+*.log
+.DS_Store
+Thumbs.db
+# Per-user data never lives in the repository (it is under %APPDATA% / ~/.config), but just in case:
+data/
+.cpm/
+.cpm-trash/
+*.tmp

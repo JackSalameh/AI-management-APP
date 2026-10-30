@@ -1,0 +1,18 @@
+{
+  "name": "codex-projects-management",
+  "version": "2.0.0",
+  "description": "Desktop workbench for Codex and other coding agents: projects, conversations, memory, Git, VS Code, MATLAB and Jira.",
+  "author": "Jack Salameh <jacksalameh@live.com>",
+  "license": "UNLICENSED",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=22" },
+  "bin": { "codex-projects-management": "server.mjs" },
+  "scripts": {
+    "start": "node server.mjs --open",
+    "serve": "node server.mjs",
+    "demo": "node scripts/demo.mjs --open",
+    "test": "node --test --test-concurrency=1 test/*.test.mjs"
+  },
+  "dependencies": {}
+}
