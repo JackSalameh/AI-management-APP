@@ -33,6 +33,10 @@ Working rules agreed with the owner (Jack Salameh). Refine as preferences stabil
   the conversation's folder has none, and asks every 5–10 prompts whether to update them.
 - Spec-driven development (Spec Kit) for larger changes, including changes to this app (see .specify/ and specs/).
 
+## Product direction (3.5)
+- The app must find every Claude / Codex session on the computer (sessions, rollouts, transcripts) and load it.
+- One folder per session, next to the projects (owner's choice: `D:\Claude`); CONTEXT.md / INSTRUCTIONS.md go next to the session.
+
 ## Engineering rules
 - No secrets in code, logs, chat or TOML; store them with the OS facility (DPAPI / Keychain / Secret Service) and pass them to agents as environment variables.
 - Local server binds to 127.0.0.1, checks Host/Origin and a launch token on every API call.

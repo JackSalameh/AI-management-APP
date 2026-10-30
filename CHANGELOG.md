@@ -1,5 +1,45 @@
 # Changelog
 
+## 3.5.0 — 2026-10-30
+
+### New
+- **Every Claude Code and Codex session on the computer is found and loaded.** The app searches Codex's folder
+  (`%USERPROFILE%\.codex\sessions` and `archived_sessions`), Claude Code's folder (`%USERPROFILE%\.claude\projects`),
+  the Claude desktop app's data folder (`%APPDATA%\Claude`), the sessions folder, and any folder or drive you add
+  (Configuration › Sessions › “Search another folder or drive…”). It recognises Codex rollouts
+  (`rollout-….jsonl` starting with `session_meta`) and Claude Code transcripts (`<uuid>.jsonl` with `sessionId`),
+  wherever they are, skipping caches and `node_modules`. Titles come from the session (rename, AI title, desktop app
+  title) or its first message.
+- **Sessions found elsewhere are imported** into the agent's own folder (a copy; the original is untouched), so they
+  appear in the Explorer and can be read *and continued*: verified with codex-cli 0.166 (a rollout copied into
+  `sessions\YYYY\MM\DD\` is listed, read and resumed, even while the app-server runs). Claude Code sessions are
+  placed under `projects\<encoded folder>\`, where `claude --resume` looks for them.
+- **One folder per conversation** in a sessions folder you choose (asked once at start-up; suggested: the folder
+  that holds the app, e.g. `D:\Claude`). Each folder is named after the conversation and holds `session.json`,
+  an up-to-date copy of the session file, `TRANSCRIPT.md`, and — when you create them — **`CONTEXT.md` and
+  `INSTRUCTIONS.md`, next to the session**. They are loaded with every message, like before.
+- A session folder made by hand (or on another computer) is recognised by its `session.json` and linked to its
+  conversation, with its title, its project folder and its memory files.
+- A conversation recorded in a folder that does not exist on this computer (cloud session, Claude desktop app
+  virtual machine) runs in the folder named in `session.json`, else in its session folder.
+- `scripts\move-agent-data-windows.cmd`: moves `%USERPROFILE%\.claude` and `.codex` to another drive (default:
+  `AppData` next to the app's folder, e.g. `D:\Claude\AppData`) and leaves a directory junction, so Claude Code,
+  Codex and this app write every new session there. No administrator rights; safe to run again.
+- Configuration › Sessions: the sessions folder, the places searched, “Find sessions now”, the last search's
+  result and the list of imported sessions. The conversation header shows the session folder (click to open it).
+
+## 3.4.1 — 2026-10-30
+
+### New
+- **Sign in to your AI accounts from the app** (Configuration › Accounts & providers, the AI menu in the top bar,
+  and a banner in any conversation whose AI is not signed in):
+  - **Claude Code**: “Sign in with my Claude account” opens a window running Claude Code's own `claude auth login`
+    (browser sign-in, Claude subscription) — or the Anthropic Console for API billing; the app follows
+    `claude auth status` and shows “Signed in” as soon as it is done.
+  - **Codex**: “Sign in with ChatGPT” opens the OpenAI sign-in page (Codex `account/login/start`); the app is told
+    when it completes and shows the account e-mail and plan; or use an OpenAI API key.
+- A reply that fails because the AI is not signed in now offers the sign-in instead of only showing the error.
+
 ## 3.4.0 — 2026-10-30
 
 ### Fixed

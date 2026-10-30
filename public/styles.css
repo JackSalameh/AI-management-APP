@@ -392,3 +392,5 @@ body.mode-simple .pro-only { display: none !important; }
 .usage b { font-weight: 600; color: var(--text); }
 .usage .hot { color: var(--warn); font-weight: 600; }
 .usage[data-tip]:hover::after { white-space: pre; text-align: left; left: auto; right: 0; transform: none; }
+
+.acct { margin: 6px 0 4px; } .acct-line { display: flex; align-items: center; gap: 6px; }

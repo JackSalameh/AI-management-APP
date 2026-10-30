@@ -45,6 +45,11 @@ Settings from *Codex Projects Management* (earlier name) are imported automatica
 - **Explorer** — your folders as on disk (`D:` › `X1191` › `Distance focal`) with their conversations.
   Click a folder to open its **project overview**: conversations, files with preview, shared memory, skills,
   Git status and README, plus *New conversation*, VS Code, MATLAB and Explorer buttons.
+- **All your sessions** — every Codex and Claude Code session on the computer is found (Codex and Claude Code
+  folders, the Claude desktop app, any folder or drive you add) and shown in the Explorer; sessions the agent
+  cannot see are imported so they can be continued. Each conversation gets **its own folder** in the sessions
+  folder you choose (e.g. `D:\Claude\<conversation>`), holding a copy of the session, `TRANSCRIPT.md`, and its
+  `CONTEXT.md` / `INSTRUCTIONS.md` when you create them (*Configuration › Sessions*).
 - **New conversation** — one window: choose the AI, give a title, and (optionally) a starting context and
   instructions, saved as `CONTEXT.md` / `INSTRUCTIONS.md` and refined as you work.
 - **Chat** — streamed replies, commands with output, file diffs, approvals, model and reasoning effort beside

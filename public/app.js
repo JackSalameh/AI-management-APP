@@ -98,6 +98,7 @@ function showMenu(anchor, items) {
   closeMenu();
   const m = h('div', { class: 'menu', role: 'menu' });
   for (const it of items) {
+    if (!it) continue;
     if (it === '-') { m.append(h('hr')); continue; }
     if (!it || it.hidden) continue;
     m.append(h('button', { class: `${it.danger ? 'danger' : ''} ${it.cls || ''}`, onclick: () => { closeMenu(); it.run(); }, html: (it.html || icon(it.icon || 'chevron')) + `<span>${esc(it.label)}</span>` }));
@@ -176,6 +177,7 @@ async function renderTop() {
   const pill = h('button', { class: 'agent-pill', style: { border: 0, cursor: 'pointer' }, 'data-tip': agents.map(([, a]) => `${a.label}: ${t(a.state) || a.state}`).join(' · ') || t('accounts'), onclick: (e) => showMenu(e.currentTarget, [
     ...agents.map(([id, a]) => ({ label: `${a.label} — ${t(a.state) || a.state}`, html: `<span class="dot ${a.state}" style="margin:0 5px"></span>`, run: () => (id === 'codex' ? reconnect() : openSettings('accounts')) })),
     '-',
+    ...['claude', 'codex'].filter((id) => sum.agents[id] && sum.agents[id].state !== 'missing').map((id) => ({ label: `${t('signIn')} — ${sum.agents[id].label}`, icon: 'key', run: () => signIn(id, id === 'claude' ? 'claudeai' : 'chatgpt') })),
     { label: t('reconnect') + ' (Codex)', icon: 'refresh', run: reconnect },
     { label: t('accounts'), icon: 'key', run: () => openSettings('accounts') },
     { label: t('addons'), icon: 'puzzle', run: openAddons },
@@ -352,6 +354,7 @@ function convMenu(anchor, c) {
     { label: t('rename'), icon: 'edit', run: () => renameConversation(c) },
     { label: t('moveTo'), icon: 'folder', run: async () => { const f = await pickFolder(c.cwd); if (f) api('/api/conversation/move', { key: c.key, folder: f }).then(afterChange).catch(fail); } },
     { label: t('revealFolder'), icon: 'folderOpen', run: () => api('/api/reveal', { path: c.cwd }).catch(fail) },
+    c.sessionDir ? { label: t('openSessionFolder'), icon: 'folderOpen', run: () => api('/api/reveal', { path: c.sessionDir }).catch(fail) } : null,
     '-',
     { label: c.archived ? t('unarchive') : t('archive'), icon: 'archive', run: () => api(c.archived ? '/api/conversation/unarchive' : '/api/conversation/archive', { key: c.key }).then(afterChange).catch(fail) },
     { label: t('delete'), icon: 'trash', danger: true, run: () => deleteConversation(c) },
@@ -504,6 +507,8 @@ async function openConversation(key, { quiet = false, limit, isNew = false, focu
       S.banner = null; S.git.st = null;
     }
     renderSidebar(); renderMain(); if (settings().gitPanelOpen) loadGit(); if (S.filesOpen) { S.files = null; loadFiles(); }
+    const ag = data.record.agent;
+    if (ag === 'codex' || ag === 'claude') loadAccount(ag).then((acc) => { if (acc && acc.installed !== false && !acc.loggedIn && S.conv?.key === key) { S.banner = signInBanner(ag); renderMain(); } });
     if (focusText) highlightText(focusText);
     if (isNew) memorySetupDialog(key, { isNew: true });
     else if (!quiet && data.record.memoryState === 'ask' && settings().askMemory !== false) askMemoryForExisting(key);
@@ -554,7 +559,8 @@ function memorySetupDialog(key, { isNew }) {
       setTimeout(() => $.input?.focus(), 60);
     } catch (e) { done = false; fail(e); }
   };
-  const m = modal({ title: t('memSetupTitle'), cls: 'mid', body: h('div', {}, h('p', { class: 'help' }, t('memSetupIntro')),
+  const where = settings().sessionsRoot ? h('p', { class: 'help' }, t('memInSession', { dir: S.conv?.key === key && S.conv.record.sessionDir ? S.conv.record.sessionDir : settings().sessionsRoot })) : null;
+  const m = modal({ title: t('memSetupTitle'), cls: 'mid', body: h('div', {}, h('p', { class: 'help' }, t('memSetupIntro')), where,
       field(t('title'), title), field(t('contextBox'), ctx), field(t('instructionsBox'), ins)),
     foot: [h('button', { class: 'btn', onclick: () => finish(false) }, isNew ? t('skipNoFiles') : t('noThanks')), h('button', { class: 'btn primary', onclick: () => finish(true) }, t('createFiles'))],
     onClose: () => { if (!done && isNew && title.value.trim()) api('/api/conversation/rename', { key, title: title.value.trim() }).then(() => loadState(false)).catch(() => {}); } });
@@ -651,7 +657,8 @@ function renderMain() {
   $.status = h('div', { class: 'status-chip-wrap' });
   const mf = r.memoryFound?.files || [];
   const short = (f) => (f.current ? '' : f.folder.split(/[\\/]/).filter(Boolean).pop() + '/') + f.file.split(/[\\/]/).pop() + (f.legacy ? ` (${t('fromV1')})` : '');
-  const membar = h('div', { class: 'membar' }, h('span', { html: icon('book') }),
+  const sessChip = r.sessionDir ? h('button', { class: 'chip small', title: r.sessionDir, 'data-tip': t('sessionFolderTip'), html: icon('folderOpen') + esc(r.sessionDir.split(/[\\/]/).filter(Boolean).pop()), onclick: () => api('/api/reveal', { path: r.sessionDir }).catch(fail) }) : null;
+  const membar = h('div', { class: 'membar' }, sessChip, h('span', { html: icon('book') }),
     mf.length ? [h('span', { class: 'help' }, t('memLoaded')), ...mf.map((f) => h('button', { class: 'chip small', title: f.file, onclick: () => openMemoryEditor(f.file, short(f)) }, short(f)))]
       : [h('span', { class: 'help' }, t('memNone')), h('button', { class: 'chip small', onclick: () => memorySetupDialog(S.conv.key, { isNew: false }) }, '+ ' + t('createFiles'))]);
   const head = h('div', { class: 'conv-head' }, showBtn,
@@ -1154,6 +1161,49 @@ async function send() {
     renderMain();
   } finally { S.sending = false; if ($.sendBtn) $.sendBtn.disabled = false; }
 }
+// ------------------------------------------------------------------ AI accounts: sign in to Codex / Claude Code from the app
+S.auth = S.auth || {};
+async function loadAccount(agent) { try { S.auth[agent] = await api('/api/agent/account' + q({ agent })); } catch { S.auth[agent] = null; } return S.auth[agent]; }
+function accountLine(agent, acc) {
+  if (!acc) return t('checking');
+  if (!acc.loggedIn) return t('notSignedIn');
+  const who = acc.email || (acc.method === 'apiKey' ? t('apiKeyLabel') : acc.method === 'oauth_token' || acc.method === 'claude.ai' ? t('claudeSubscription') : acc.method || '');
+  return `${t('signedInAs', { who })}${acc.plan ? ` · ${acc.plan}` : ''}`;
+}
+/** Starts the sign-in, then follows it until the account is connected (5 min max). */
+async function signIn(agent, method) {
+  try {
+    const r = await api('/api/agent/signin', { agent, method });
+    toast(r.opened === 'terminal' ? t('signInTerminal') : r.opened === 'browser' ? t('signInBrowser') : t('signedInDone'));
+  } catch (e) { fail(e); return false; }
+  for (let i = 0; i < 100; i++) {
+    await new Promise((res) => setTimeout(res, 3000));
+    const acc = await loadAccount(agent);
+    if (acc?.loggedIn) { toast(`${S.sum.agents[agent]?.label || agent}: ${accountLine(agent, acc)}`); S.banner = null; renderAll(); return true; }
+  }
+  return false;
+}
+function accountBox(agent) {
+  const line = h('div', { class: 'help acct-line' }, t('checking'));
+  const box = h('div', { class: 'acct' }, line);
+  const draw = (acc) => {
+    line.replaceChildren(h('span', { class: `dot ${acc?.loggedIn ? 'ready' : 'error'}` }), ' ', accountLine(agent, acc));
+    const btns = agent === 'claude'
+      ? [h('button', { class: `btn small ${acc?.loggedIn ? '' : 'primary'}`, onclick: () => signIn('claude', 'claudeai').then(() => loadAccount('claude').then(draw)) }, acc?.loggedIn ? t('switchAccount') : t('signInClaude')),
+         h('button', { class: 'btn small', onclick: () => signIn('claude', 'console').then(() => loadAccount('claude').then(draw)) }, t('signInConsole'))]
+      : [h('button', { class: `btn small ${acc?.loggedIn ? '' : 'primary'}`, onclick: () => signIn('codex', 'chatgpt').then(() => loadAccount('codex').then(draw)) }, acc?.loggedIn ? t('switchAccount') : t('signInChatGPT')),
+         h('button', { class: 'btn small', onclick: async () => { const k = await ask({ title: 'OpenAI API key', label: t('apiKeyLabel'), password: true }); if (k) { try { await api('/api/agent/signin', { agent: 'codex', method: 'apiKey', apiKey: k.trim() }); draw(await loadAccount('codex')); } catch (e) { fail(e); } } } }, t('useApiKey'))];
+    box.replaceChildren(line, h('div', { class: 'inline' }, ...btns, h('button', { class: 'btn small', 'data-tip': t('refresh'), html: icon('refresh'), onclick: async () => draw(await loadAccount(agent)) })));
+  };
+  loadAccount(agent).then(draw);
+  return box;
+}
+const AUTH_ERROR = /not logged in|please run \/login|invalid api key|authentication|unauthori[sz]ed|401|sign in|login required|requiresOpenaiAuth/i;
+function signInBanner(agent) {
+  const label = S.sum.agents[agent]?.label || agent;
+  return { kind: 'warn', text: t('needSignIn', { ai: label }), actions: [{ label: agent === 'claude' ? t('signInClaude') : t('signInChatGPT'), run: () => signIn(agent, agent === 'claude' ? 'claudeai' : 'chatgpt') }] };
+}
+
 /** Every 5–10 prompts: update the context/instructions files automatically (by the AI) or manually (editor)? */
 function memoryUpdateBanner(key, n) {
   const remember = h('input', { type: 'checkbox' });
@@ -1755,7 +1805,7 @@ async function jiraAction() {
 
 // ------------------------------------------------------------------ settings dialog
 async function openSettings(tab = 'general', focusTool) {
-  const tabs = [['general', 'gear'], ['accounts', 'bot'], ['appearance', 'eye'], ['models', 'cpu'], ['keys', 'key'], ['tools', 'tool'], ['skills', 'puzzle'], ['configToml', 'fileText'], ['about', 'info']];
+  const tabs = [['general', 'gear'], ['sessions', 'folder'], ['accounts', 'bot'], ['appearance', 'eye'], ['models', 'cpu'], ['keys', 'key'], ['tools', 'tool'], ['skills', 'puzzle'], ['configToml', 'fileText'], ['about', 'info']];
   if (tab === 'agents') tab = 'accounts';
   const nav = h('nav');
   const section = h('section');
@@ -1892,7 +1942,57 @@ function readFileAsText(accept) {
   });
 }
 
+/** Configuration › Sessions: the folder that gets one sub-folder per conversation, and where sessions are searched. */
+async function sessionsPanel() {
+  const wrap = h('div');
+  const draw = (info) => {
+    const last = info.last;
+    const rootInput = input(info.root, () => {}, { placeholder: info.suggestedRoot });
+    const set = async (patch) => { try { draw(await api('/api/sessions', patch)); } catch (e) { fail(e); } };
+    const scan = async (btn, folder) => {
+      btn.disabled = true; btn.textContent = t('sessScanning');
+      try { const r = await api('/api/sessions/scan', folder ? { folder } : {}); S.sum = r.summary; renderSidebar(); draw(r); toast(t('sessScanDone', { n: r.last?.found ?? 0, i: r.last?.imported?.length ?? 0 })); } catch (e) { fail(e); btn.disabled = false; }
+    };
+    const scanBtn = h('button', { class: 'btn primary', html: icon('refresh') + t('sessScanNow'), onclick: (e) => scan(e.currentTarget) });
+    wrap.replaceChildren(
+      h('h3', {}, t('sessions')),
+      h('p', { class: 'help' }, t('sessIntro')),
+      field(t('sessRoot'), h('div', { class: 'inline' }, rootInput,
+        h('button', { class: 'btn', onclick: async () => { const f = await pickFolder(rootInput.value || info.suggestedRoot); if (f) set({ root: f }); } }, t('browse')),
+        h('button', { class: 'btn', onclick: () => set({ root: rootInput.value.trim() }) }, t('save')),
+        info.root ? h('button', { class: 'btn', onclick: () => api('/api/reveal', { path: info.root }).catch(fail) }, t('openInExplorer')) : null),
+      info.root ? t('sessRootHelp', { n: info.withFolder, total: info.total }) : t('sessNoRoot', { dir: info.suggestedRoot })),
+      checkbox(t('sessFolders'), info.folders, (v) => set({ folders: v })),
+      checkbox(t('sessImport'), info.import, (v) => set({ import: v })),
+      h('h3', {}, t('sessWhere')),
+      h('div', { class: 'list' }, ...info.sources.map((src) => h('div', { class: 'li' }, h('span', { html: icon(src.exists ? 'check' : 'folder') }),
+        h('div', { class: 'grow' }, h('div', {}, src.label), h('div', { class: 'sub' }, src.dir + (src.exists ? '' : ` — ${t('notFound')}`))),
+        src.label === 'Added by you' ? h('button', { class: 'btn small', onclick: () => set({ scanRoots: info.scanRoots.filter((d) => d !== src.dir) }) }, t('remove')) : null))),
+      h('div', { class: 'inline', style: { marginTop: '10px' } }, scanBtn,
+        h('button', { class: 'btn', html: icon('plus') + t('sessAddPlace'), onclick: async (e) => { const btn = e.currentTarget; const f = await pickFolder(); if (f) scan(btn, f); } })),
+      last ? h('p', { class: 'help' }, t('sessLast', { n: last.found, c: last.codex, l: last.claude, i: last.imported.length, s: Math.max(1, Math.round(last.ms / 1000)) }) + (last.truncated ? ` ${t('sessTruncated')}` : '')) : null,
+      last?.imported?.length ? h('details', {}, h('summary', {}, t('sessImported', { n: last.imported.length })), h('div', { class: 'list' }, ...last.imported.map((x) => h('div', { class: 'li' }, h('div', { class: 'grow' }, h('div', {}, `${x.agent === 'codex' ? 'Codex' : 'Claude Code'} · ${x.title || x.id}`), h('div', { class: 'sub' }, `${x.from} → ${x.to}`)))))) : null,
+      h('p', { class: 'help' }, t('sessWhy')));
+  };
+  draw(await api('/api/sessions'));
+  return wrap;
+}
+
+/** Asked once: where should every conversation get its own folder? (suggestion: the folder that holds the app) */
+async function sessionsSetupDialog() {
+  let info; try { info = await api('/api/sessions'); } catch { return; }
+  if (info.root || info.asked) return;
+  const dir = input(info.suggestedRoot, () => {});
+  const go = async (root) => {
+    try { await api('/api/sessions', root ? { root } : { asked: true }); m.close(); if (root) { toast(t('sessScanning')); const r = await api('/api/sessions/scan', {}); S.sum = r.summary; renderSidebar(); toast(t('sessScanDone', { n: r.last?.found ?? 0, i: r.last?.imported?.length ?? 0 })); } } catch (e) { fail(e); }
+  };
+  const m = modal({ title: t('sessSetupTitle'), cls: 'mid',
+    body: h('div', {}, h('p', {}, t('sessIntro')), field(t('sessRoot'), h('div', { class: 'inline' }, dir, h('button', { class: 'btn', onclick: async () => { const f = await pickFolder(dir.value); if (f) dir.value = f; } }, t('browse')))), h('p', { class: 'help' }, t('sessWhy'))),
+    foot: [h('button', { class: 'btn', onclick: () => go('') }, t('notNow')), h('button', { class: 'btn primary', onclick: () => go(dir.value.trim()) }, t('sessUseFolder'))] });
+}
+
 const SETTINGS = {
+  sessions() { return sessionsPanel(); },
   general() {
     const s = settings();
     return [h('h3', {}, t('general')),
@@ -1948,7 +2048,7 @@ const SETTINGS = {
         h('div', { class: 'card-head', html: `${await toolIcon(ik, fb)}<h4>${esc(a.label)}</h4><span class="agent-pill"><span class="dot ${a.state}"></span>${esc(a.installed ? t(a.state) || a.state : t('notInstalled'))}</span>` }),
         h('p', { class: 'help' }, t('canEdit') + '. ' + t('signInHint')),
         a.error && a.installed ? h('div', { class: 'help', style: { color: 'var(--danger)' } }, a.error) : null,
-        !a.installed ? h('button', { class: 'btn primary small', onclick: () => installAddon(addon), html: icon('download') + t('install') }) : null,
+        !a.installed ? h('button', { class: 'btn primary small', onclick: () => installAddon(addon), html: icon('download') + t('install') }) : accountBox(a.id),
         field(t('agentPath'), input((settings().agentBins || {})[a.id] || '', (v) => patchSettings({ agentBins: { ...(settings().agentBins || {}), [a.id]: v } }, true), { placeholder: a.id })),
         a.id === 'codex' ? h('div', { class: 'inline' }, h('button', { class: 'btn small', onclick: reconnect, html: icon('refresh') + t('reconnect') }), checkPanel('codex')) : null);
     }));
@@ -2307,6 +2407,8 @@ function onEvent(e) {
       if (isActive) {
         S.conv.running = false;
         if (e.status === 'failed' && e.error) { S.conv.items.push({ id: 'err-' + Date.now(), kind: 'error', text: e.error }); }
+        const lastErr = e.error || [...(S.conv.items || [])].reverse().find((i) => i.kind === 'error')?.text || '';
+        if (e.status === 'failed' && AUTH_ERROR.test(lastErr) && ['codex', 'claude'].includes(S.conv.record.agent)) S.banner = signInBanner(S.conv.record.agent);
         renderMain();
         setTimeout(async () => { if (S.conv?.key === e.key && !S.conv.running) { const d = await api('/api/conversation' + q({ key: e.key })).catch(() => null); if (d && S.conv?.key === e.key && !S.conv.running) { S.conv.items = d.items; S.itemIdx = new Map(d.items.map((i) => [i.id, i])); S.conv.record = d.record; S.conv.memory = d.memory; renderStream(); refreshHeader(); } } }, 600);
         if (settings().gitPanelOpen) loadGit();
@@ -2325,6 +2427,7 @@ function onEvent(e) {
     case 'addons.changed': S.addonsRefresh?.(); break;
     case 'icons.updated': S.sum.icons = e.icons; setLogos(S.sum.logos, S.sum.icons, TOKEN); renderTop(); if (S.conv || S.project) renderMain(); break;
     case 'files.changed': if (isActive && S.filesOpen) loadFiles(); break;
+    case 'account.login': if (e.success) { loadAccount(e.agent).then(() => { toast(`${S.sum.agents[e.agent]?.label}: ${t('signedInDone')}`); if (S.banner?.text?.includes(S.sum.agents[e.agent]?.label)) S.banner = null; renderAll(); }); } else if (e.error) toast(e.error, true); break;
     case 'spec.changed': if (S.project && e.folder && S.project.folder.toLowerCase() === e.folder.toLowerCase()) openProject(S.project.folder); break;
     case 'memory.updated': if (e.key === S.conv?.key) { if (e.error) toast(e.error, true); else if (e.files?.length) toast(t('memUpdDone', { files: e.files.map((f) => f.split(/[\\/]/).pop()).join(', ') })); refreshMemoryInfo().then(() => renderMain()); } break;
     case 'mcp.connection': toast(`${e.label || e.name}: ${t('mcp_' + e.state)}${e.detail ? ' — ' + e.detail : ''}`, !e.ok && e.state !== 'needs-login' && e.state !== 'waiting'); break;
@@ -2364,7 +2467,7 @@ function noToken() { document.getElementById('app').replaceChildren(h('div', { c
   if (last && S.sum.conversations.some((c) => c.key === last)) await openConversation(last);
   if (settings().gitPanelOpen) loadGit();
   connectEvents();
-  if (!S.sum.onboarded) openOnboarding();
+  if (!S.sum.onboarded) openOnboarding(); else sessionsSetupDialog();
   window.addEventListener('beforeunload', () => es?.close());
   // Pick up conversations created elsewhere (e.g. in a terminal) with a cheap incremental refresh.
   setInterval(() => { if (document.visibilityState === 'visible' && S.conn === 'ok') api('/api/refresh', { full: false }).then((r) => { if (r.changed) loadState(false); }).catch(() => {}); }, 60_000);

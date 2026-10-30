@@ -24,8 +24,28 @@ const MODELS = [
   { id: 'gpt-6.1-sol', efforts: ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'], def: 'low', isDefault: true },
   { id: 'gpt-5.5', efforts: ['low', 'medium', 'high', 'xhigh'], def: 'medium', isDefault: false },
 ];
-const threadView = (t, turns = false) => ({ id: t.id, sessionId: t.id, forkedFromId: null, parentThreadId: null, preview: t.preview || '', ephemeral: false, modelProvider: t.provider || 'openai', model: t.model || 'gpt-6.1-sol', reasoningEffort: t.effort || null, createdAt: t.createdAt, updatedAt: t.updatedAt, status: { type: 'idle' }, path: t.turns.length ? path.join(HOME, 'sessions', `rollout-${t.id}.jsonl`) : null, cwd: t.cwd, cliVersion: '0.166.0', source: 'appServer', name: t.name || null, turns: turns ? t.turns : [] });
+const threadView = (t, turns = false) => ({ id: t.id, sessionId: t.id, forkedFromId: null, parentThreadId: null, preview: t.preview || '', ephemeral: false, modelProvider: t.provider || 'openai', model: t.model || 'gpt-6.1-sol', reasoningEffort: t.effort || null, createdAt: t.createdAt, updatedAt: t.updatedAt, status: { type: 'idle' }, path: t.path || (t.turns.length ? path.join(HOME, 'sessions', `rollout-${t.id}.jsonl`) : null), cwd: t.cwd, cliVersion: '0.166.0', source: 'appServer', name: t.name || null, turns: turns ? t.turns : [] });
 const active = new Map();
+// Like codex-cli 0.166: a rollout copied into $CODEX_HOME/sessions/YYYY/MM/DD/ (with session_meta) becomes a thread.
+function adoptRollouts() {
+  const s = load(); let changed = false;
+  const walk = (d) => { let es = []; try { es = fs.readdirSync(d, { withFileTypes: true }); } catch { return; } for (const e of es) { const p = path.join(d, e.name); if (e.isDirectory()) walk(p); else if (/^rollout-.*\.jsonl$/.test(e.name)) adopt(p); } };
+  const adopt = (file) => {
+    const lines = fs.readFileSync(file, 'utf8').split('\n').filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
+    const meta = lines.find((l) => l.type === 'session_meta')?.payload;
+    if (!meta?.id || s.threads[meta.id]) return;
+    const items = [];
+    for (const l of lines) {
+      if (l.type === 'event_msg' && l.payload?.type === 'user_message') items.push({ type: 'userMessage', id: `u${items.length}`, content: [{ type: 'text', text: l.payload.message, text_elements: [] }] });
+      if (l.type === 'event_msg' && l.payload?.type === 'agent_message') items.push({ type: 'agentMessage', id: `a${items.length}`, text: l.payload.message });
+    }
+    const t = Math.floor((Date.parse(meta.timestamp) || Date.now()) / 1000);
+    s.threads[meta.id] = { id: meta.id, cwd: meta.cwd, createdAt: t, updatedAt: t, preview: items[0]?.content?.[0]?.text || '', path: file, turns: [{ id: 'turn-1', status: 'completed', items }] };
+    changed = true;
+  };
+  walk(path.join(HOME, 'sessions'));
+  if (changed) save(s);
+}
 function writeRollout(t) {
   if (!t.turns.length) return;
   const dir = path.join(HOME, 'sessions'); fs.mkdirSync(dir, { recursive: true });
@@ -98,7 +118,7 @@ async function runTurn(threadId, params) {
 const handlers = {
   initialize: () => { for (const t of Object.values(load().threads)) writeRollout(t); return { userAgent: 'cpm/0.166.0 (fake)', codexHome: HOME, platformFamily: 'unix', platformOs: 'linux' }; },
   'thread/start': (p) => { const s = load(); const id = crypto.randomUUID(); s.threads[id] = { id, cwd: p.cwd, model: p.model, provider: p.modelProvider, effort: p.config?.model_reasoning_effort, createdAt: now(), updatedAt: now(), turns: [], archived: false, startParams: p }; save(s); return { thread: threadView(s.threads[id]), model: p.model || 'gpt-6.1-sol', modelProvider: p.modelProvider || 'openai', reasoningEffort: p.config?.model_reasoning_effort || 'low', cwd: p.cwd, approvalPolicy: p.approvalPolicy || 'on-request', sandbox: { type: 'readOnly' }, serviceTier: null, disabledPluginIds: [], instructionSources: [], approvalsReviewer: 'user' }; },
-  'thread/list': (p) => { const s = load(); const data = Object.values(s.threads).filter((t) => t.turns.length && !!t.archived === !!p.archived).sort((a, b) => b.updatedAt - a.updatedAt).map((t) => threadView(t)); return { data, nextCursor: null, backwardsCursor: null }; },
+  'thread/list': (p) => { adoptRollouts(); const s = load(); const data = Object.values(s.threads).filter((t) => t.turns.length && !!t.archived === !!p.archived).sort((a, b) => b.updatedAt - a.updatedAt).map((t) => threadView(t)); return { data, nextCursor: null, backwardsCursor: null }; },
   // Mirrors codex-cli 0.166: metadata reads work for empty threads, includeTurns does not.
   'thread/read': (p) => { const t = load().threads[p.threadId]; if (!t) throw { code: -32600, message: `thread ${p.threadId} not found` }; if (p.includeTurns && !t.turns.length) throw { code: -32601, message: 'list_turns is not supported yet' }; return { thread: threadView(t, p.includeTurns) }; },
   'thread/turns/list': (p) => { const t = load().threads[p.threadId]; if (!t) throw { code: -32600, message: 'thread not found' }; const all = p.sortDirection === 'asc' ? t.turns : [...t.turns].reverse(); const start = +(p.cursor || 0); const lim = p.limit || 50; return { data: all.slice(start, start + lim), nextCursor: start + lim < all.length ? String(start + lim) : null, backwardsCursor: null }; },
@@ -117,6 +137,13 @@ const handlers = {
   'config/mcpServer/reload': () => ({}),
   'skills/list': (p) => ({ data: p.cwds.map((cwd) => ({ cwd, skills: listSkills(cwd), errors: [] })) }),
   'mcpServerStatus/list': () => ({ data: Object.entries(load().config.mcp_servers || {}).filter(([, v]) => v.enabled !== false).map(([name]) => ({ name, tools: { tool_a: {}, tool_b: {} }, authStatus: { type: 'bearerToken' }, toolsError: null })) }),
+  'account/read': () => { const a = load().account; return { account: a || null, requiresOpenaiAuth: !a }; },
+  'account/login/start': (p) => {
+    if (p.type === 'apiKey') { const st = load(); st.account = { type: 'apiKey' }; save(st); return { type: 'apiKey' }; }
+    const loginId = crypto.randomUUID();
+    setTimeout(() => { const st = load(); st.account = { type: 'chatgpt', email: 'jack@example.com', planType: 'plus', workspaceName: null }; save(st); notify('account/login/completed', { loginId, success: true, error: null, onboardingEntrypoint: null }); }, 150);
+    return { type: 'chatgpt', loginId, authUrl: 'https://auth.openai.com/oauth/authorize?fake=1' };
+  },
   'plugin/list': () => ({ marketplaces: (load().marketplaces || []).map((m) => ({ name: m.name, path: `${m.root}/marketplace.json`, plugins: [] })), marketplaceLoadErrors: [], featuredPluginIds: [] }),
   'marketplace/add': (p) => { const st = load(); st.marketplaces ||= []; const name = p.source.split('/').pop().toLowerCase(); const already = st.marketplaces.some((m) => m.name === name); if (!already) st.marketplaces.push({ name, root: `/plugins/${name}` }); save(st); return { marketplaceName: name, installedRoot: `/plugins/${name}`, alreadyAdded: already }; },
   'plugin/install': (p) => { const st = load(); (st.pluginInstalls ||= []).push(p); save(st); return { authPolicy: 'ON_INSTALL', appsNeedingAuth: [] }; },

@@ -21,6 +21,8 @@ process.env.FAKE_NPM_LOG = path.join(root, 'npm.log');
 process.env.PATH = `${path.join(here, 'fixtures', 'bin')}${path.delimiter}${process.env.PATH}`;
 process.env.CPM_NO_EXIT = '1';
 process.env.CPM_NO_AUTO_ICONS = '1';
+process.env.CPM_TERMINAL_INLINE = '1';
+process.env.CPM_NO_BROWSER = '1';
 const { createServer } = await import('../server.mjs');
 
 // ---- stub provider endpoints (OpenAI-compatible, Anthropic, Gemini), recording requests
@@ -480,4 +482,34 @@ test('Trail: set up in a folder (trail init --yes <dir>), learnings listed in th
   const hub = await api(`/api/project?folder=${encodeURIComponent(folder)}`);
   assert.equal(hub.trail.initialized, true);
   assert.deepEqual(hub.trail.learnings.map((l) => l.name), ['2026-10-30-kaiser']);
+});
+
+
+test('sign in from the app: Claude Code (claude auth login in a window) and Codex (ChatGPT page), status detected', async () => {
+  const app = srv.app;
+  app.agents.claude.binSetting = path.join(here, 'fixtures', 'fake-claude.mjs');
+  try {
+    fs.rmSync(path.join(process.env.CLAUDE_CONFIG_DIR, '.fake-signed-in'), { force: true });
+    let acc = await api('/api/agent/account?agent=claude');
+    assert.equal(acc.loggedIn, false);
+    const s = await api('/api/agent/signin', { agent: 'claude', method: 'claudeai' });
+    assert.equal(s.status, 200, s.error); assert.equal(s.opened, 'terminal');
+    for (let i = 0; i < 50 && !acc.loggedIn; i++) { await new Promise((r) => setTimeout(r, 100)); acc = await api('/api/agent/account?agent=claude'); }
+    assert.equal(acc.loggedIn, true); assert.equal(acc.method, 'claude.ai');
+    assert.equal(fs.readFileSync(path.join(process.env.CLAUDE_CONFIG_DIR, '.fake-signed-in'), 'utf8'), '--claudeai', 'Claude subscription sign-in');
+    await api('/api/agent/signin', { agent: 'claude', method: 'console' });
+    for (let i = 0; i < 50; i++) { await new Promise((r) => setTimeout(r, 100)); if (fs.readFileSync(path.join(process.env.CLAUDE_CONFIG_DIR, '.fake-signed-in'), 'utf8') === '--console') break; }
+    assert.equal(fs.readFileSync(path.join(process.env.CLAUDE_CONFIG_DIR, '.fake-signed-in'), 'utf8'), '--console');
+  } finally { app.agents.claude.binSetting = null; }
+  // Codex: not signed in → ChatGPT sign-in page → account.login event → signed in
+  let c = await api('/api/agent/account?agent=codex');
+  assert.equal(c.loggedIn, false);
+  events = [];
+  const r = await api('/api/agent/signin', { agent: 'codex', method: 'chatgpt' });
+  assert.equal(r.opened, 'browser');
+  const done = await waitFor((e) => e.type === 'account.login');
+  assert.equal(done.success, true);
+  c = await api('/api/agent/account?agent=codex');
+  assert.deepEqual([c.loggedIn, c.email, c.plan], [true, 'jack@example.com', 'plus']);
+  assert.equal((await api('/api/agent/signin', { agent: 'codex', method: 'apiKey', apiKey: 'short' })).status, 400);
 });

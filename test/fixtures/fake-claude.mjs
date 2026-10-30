@@ -6,6 +6,10 @@ const file = path.join(process.env.CLAUDE_CONFIG_DIR, '.claude.json');
 const read = () => { try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return {}; } };
 const write = (j) => { fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, JSON.stringify(j, null, 2)); };
 const [cmd, sub, ...rest] = process.argv.slice(2);
+// `claude auth status --json` / `claude auth login` (signed-in state kept in a marker file)
+const marker = path.join(process.env.CLAUDE_CONFIG_DIR, '.fake-signed-in');
+if (cmd === 'auth' && sub === 'status') { const on = fs.existsSync(marker); console.log(JSON.stringify(on ? { loggedIn: true, authMethod: 'claude.ai', apiProvider: 'firstParty' } : { loggedIn: false, authMethod: 'none' })); process.exit(on ? 0 : 1); }
+if (cmd === 'auth' && sub === 'login') { fs.mkdirSync(path.dirname(marker), { recursive: true }); fs.writeFileSync(marker, rest.join(' ')); console.log('Login successful.'); process.exit(0); }
 if (cmd !== 'mcp') { process.stdout.write('Usage: claude [options]\n  --effort <level>  (low, medium, high, xhigh, max)\n'); process.exit(0); }
 const args = rest.filter((a, i) => a !== '-s' && rest[i - 1] !== '-s');
 const j = read(); j.mcpServers ||= {};
