@@ -12,6 +12,7 @@ const dataDir = path.join(root, 'data'), codexHome = path.join(root, 'codex'), w
 fs.mkdirSync(codexHome, { recursive: true }); fs.mkdirSync(work, { recursive: true });
 process.env.CPM_CODEX_BIN = path.join(here, 'fixtures', 'fake-codex.mjs');
 process.env.CPM_CLAUDE_BIN = path.join(root, 'no-claude');
+process.env.CLAUDE_CONFIG_DIR = path.join(root, 'claude'); // never read the real ~/.claude sessions of the machine running the tests
 process.env.CPM_NO_EXIT = '1';
 process.env.CPM_NO_AUTO_ICONS = '1';
 const { createServer } = await import('../server.mjs');
@@ -287,14 +288,14 @@ test('jira: remote MCP with bearer token keeps the secret out of config', async 
   const r = await api('/api/jira/configure', { mode: 'remote', url: 'https://mcp.example.com/v1/mcp', auth: 'bearer', token: 'tok-123' });
   assert.equal(r.status, 200, r.error);
   const cfg = fake().config;
-  assert.equal(cfg.mcp_servers.jira.bearer_token_env_var, 'JIRA_MCP_TOKEN');
+  assert.equal(cfg.mcp_servers.atlassian.bearer_token_env_var, 'JIRA_MCP_TOKEN');
   assert.ok(!JSON.stringify(cfg).includes('tok-123'), 'token not written to config');
   const sec = await api('/api/secrets');
   assert.ok(sec.secrets.some((s) => s.name === 'JIRA_MCP_TOKEN'));
   assert.ok(!JSON.stringify(sec).includes('tok-123'), 'API never returns secret values');
   assert.equal(srv.app.agents.codex.extraEnv.JIRA_MCP_TOKEN, 'tok-123', 'token injected into the agent environment');
   await api('/api/tools', { tool: 'jira', patch: { enabled: false } });
-  assert.equal(fake().config.mcp_servers.jira.enabled, false, 'tickbox maps to mcp_servers.jira.enabled');
+  assert.equal(fake().config.mcp_servers.atlassian.enabled, false, 'tickbox maps to the MCP entry enabled flag');
 });
 
 test('archive, unarchive and delete a conversation', async () => {
@@ -374,11 +375,37 @@ test('full-text search over messages and memory with folder filter (rec. 4)', as
   res = (await api(`/api/search?q=${encodeURIComponent('resistance')}`)).results;
   assert.ok(res.some((x) => x.kind === 'agent'), 'accent-insensitive');
   res = (await api(`/api/search?q=${encodeURIComponent('secret memory')}`)).results;
-  assert.ok(!res.some((x) => x.kind === 'user'), 'injected context is not searched as a user message');
+  assert.ok(!res.some((x) => x.kind === 'user'), 'injected context is not searched as a user message ');
   res = (await api(`/api/search?q=thermistor`)).results;
   assert.equal(res[0].kind, 'memory');
   res = (await api(`/api/search?q=thermistor&folder=${encodeURIComponent(path.join(work, 'X1191'))}`)).results;
   assert.equal(res.length, 0, 'folder filter applies');
+});
+
+test('context.md / instructions.md already in the folder are loaded, even when app memory is declined', async () => {
+  const proj = path.join(work, 'Loose'), sub = path.join(proj, 'Bench');
+  fs.mkdirSync(sub, { recursive: true });
+  fs.writeFileSync(path.join(proj, 'Context.md'), 'Project: X1191 optical bench.');
+  fs.writeFileSync(path.join(sub, 'instructions.md'), 'Always answer with SI units.');
+  fs.writeFileSync(path.join(sub, 'bench_context.md'), 'Camera pixel pitch 3.45 um.');
+  fs.writeFileSync(path.join(sub, 'notes.md'), 'not a context file');
+  const r = await api('/api/conversation/new', { folder: sub });
+  await api('/api/conversation/memory-setup', { key: r.key, enable: false });
+  const open = await api('/api/conversation?key=' + encodeURIComponent(r.key));
+  assert.deepEqual(open.record.folderFiles.map((f) => path.basename(f)), ['instructions.md', 'bench_context.md']);
+  const prev = await api('/api/memory/preview?key=' + encodeURIComponent(r.key));
+  assert.equal(prev.memoryState, 'declined');
+  const s = await api('/api/conversation/send', { key: r.key, text: 'hello bench' });
+  assert.equal(s.status, 200, s.error);
+  assert.ok(s.contextSent);
+  const sent = fake().threads[r.key.split(':')[1]].lastTurnParams.text;
+  assert.match(sent, /Always answer with SI units/);
+  assert.match(sent, /pixel pitch 3\.45/);
+  assert.match(sent, /X1191 optical bench/, 'parent folder file loaded too');
+  assert.ok(sent.indexOf('X1191 optical bench') < sent.indexOf('SI units'), 'outermost folder first');
+  assert.doesNotMatch(sent, /not a context file/);
+  assert.ok(!fs.existsSync(path.join(sub, '.cpm', 'conversations')), 'declined: no conversation files created');
+  await waitFor((e) => e.type === 'turn.completed' && e.key === r.key).catch(() => {});
 });
 
 test('memory workspace: preview, pins, exclusion and diff since last send (rec. 5)', async () => {

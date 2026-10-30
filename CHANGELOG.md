@@ -1,5 +1,29 @@
 # Changelog
 
+## 3.2.0 — 2026-10-30
+
+### New
+- **MATLAB ↔ agents (MCP)**: the app asks one question — which agent uses MATLAB (Codex, Claude Code or both) —
+  then copies, field for field, the MATLAB MCP configuration that MathWorks' `setupAgenticToolkit("install")`
+  already wrote (Codex `config.toml` or Claude Code `~/.claude.json`), or an MCP JSON you import, or the detected
+  `~/.matlab/agentic-toolkits/bin/matlab-mcp-server`. When MATLAB is launched from the app, its session is shared
+  (`satk_initialize`, `shareMATLABSession`) and the MCP connection is established and reported live.
+- **Jira and Bitbucket ↔ agents (MCP)**: official Atlassian MCP server, with browser sign-in (Jira/Confluence),
+  personal API token (e-mail + token, Basic auth) or service-account key. Tokens stay in the OS keychain and
+  reach Codex through environment variables (`env_http_headers`); the card shows the live connection state.
+- **Your own context.md / instructions.md are loaded**: any `context.md`, `instructions.md` (any case, also
+  `projet_context.md`, `contexte.md`, `consignes.md`…) in the conversation folder and up to three parent folders
+  are sent with the conversation, whether or not the app's own memory files were created. The first-open
+  question lists them.
+- Official Atlassian logomarks for Jira and Bitbucket are taken from Atlassian's logo packs (ZIP); icons are
+  refetched once after this update.
+
+### Fixed
+- VS Code, MATLAB and Git buttons appeared twice (top bar and project header) — now only in the top bar.
+- Buttons with a slow action (Connect, Install, Test, Fetch icons) stayed disabled or threw an error, because
+  `e.currentTarget` is `null` after an `await`; the button is now captured first (regression test added).
+- Tests read the real Claude Code sessions of the machine running them (`CLAUDE_CONFIG_DIR` not isolated).
+
 ## 3.1.0 — 2026-10-30
 
 ### New

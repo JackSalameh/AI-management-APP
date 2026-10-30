@@ -59,7 +59,13 @@ A local desktop web app that replaces the Codex command window: projects as an E
 - Claude Code has no model-list command (2.1.314): models = aliases + settings default + Anthropic /v1/models (if key) + models seen in sessions; efforts parsed from `claude --help`.
 - Conversation Files panel derives files from the transcript (fileChange items, Codex commandActions reads, Claude Read tool) plus recorded attachments and memory files; previews limited to the conversation folder or those files.
 
+## Decisions added in 3.2
+- MATLAB MCP: MathWorks' `setupAgenticToolkit("install")` is the source of truth. It writes `[mcp_servers.matlab]` (Codex, global) or the Claude Code user config; the app only asks which agent(s) and copies that entry verbatim (priority: imported JSON > Codex entry > Claude entry > toolkit JSON files > detected binary). Every MATLAB launch runs addpath(simulink toolkit) + `satk_initialize` + `shareMATLABSession`, then waits up to 120 s for the server to list tools. Verified on real codex-cli: the exact entry shape is accepted.
+- Atlassian MCP: server names `atlassian` (Jira/Confluence) and `atlassian-bitbucket`; OAuth https://mcp.atlassian.com/v1/mcp/authv2, API token https://mcp.atlassian.com/v2/mcp (Basic base64(email:token) or Bearer service key) stored as ATLASSIAN_<NAME>_AUTH and passed via env_http_headers. Not auto-added to Claude Code when it would need a plain-text token. Bitbucket Server/Data Center: no official MCP.
+- User-kept context files: names matching LOOSE_RE (context/instructions and FR/ES/DE variants, .md/.markdown/.txt) directly in the folder and up to 3 ancestors are part of the shared context, independent of the opt-in (opt-in only governs creating .cpm files).
+
 ## Progress
+- 2026-10-30: 3.2.0 — 62 automated tests, 42 browser flows (5 suites), real codex-cli check of the MathWorks MCP entry.
 - 2026-10-30: 3.1.0 — 55 automated tests, 36 browser flows (4 suites), Claude detection checked on a real install.
 - 2026-10-30: 3.0.0 — 50 automated tests, 32 browser flows (3 suites), real codex-cli 0.166.0 smoke test.
 - 2026-10-30: rebuild completed as 2.0.0 in a cloud workspace (not deployed). Validation: 40 automated tests, 23 browser flows, smoke test against real codex-cli 0.166.0 (no account), Claude adapter read of a real session. Not verified: Windows-only paths (DPAPI, .vbs, Edge app window, MATLAB launch), real Jira/Bitbucket accounts, paid model replies. See CHANGELOG.md.

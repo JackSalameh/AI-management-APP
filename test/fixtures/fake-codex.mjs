@@ -106,7 +106,7 @@ const handlers = {
   'config/value/write': (p) => handlers['config/batchWrite']({ edits: [p] }),
   'config/mcpServer/reload': () => ({}),
   'skills/list': (p) => ({ data: p.cwds.map((cwd) => ({ cwd, skills: listSkills(cwd), errors: [] })) }),
-  'mcpServerStatus/list': () => ({ data: [] }),
+  'mcpServerStatus/list': () => ({ data: Object.entries(load().config.mcp_servers || {}).filter(([, v]) => v.enabled !== false).map(([name]) => ({ name, tools: { tool_a: {}, tool_b: {} }, authStatus: { type: 'bearerToken' }, toolsError: null })) }),
   'plugin/list': () => ({ marketplaces: [], marketplaceLoadErrors: [], featuredPluginIds: [] }),
 };
 

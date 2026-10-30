@@ -281,3 +281,62 @@ test('official icon download prefers the page icon (SVG) and saves it locally', 
   assert.ok(fs.readFileSync(path.join(dir, 'jira.svg'), 'utf8').startsWith('<svg'));
   site.close();
 });
+
+
+test('Atlassian MCP: Jira OAuth, Bitbucket API token kept in the keychain, live status', async () => {
+  const bad = await api('/api/atlassian/connect', { purpose: 'bitbucket', mode: 'oauth' });
+  assert.equal(bad.status, 400);
+  const bb = await api('/api/atlassian/connect', { purpose: 'bitbucket', mode: 'token', email: 'jack@example.com', token: 'ATATT-secret-123' });
+  assert.equal(bb.status, 200, bb.error);
+  const cfg = fake().config.mcp_servers['atlassian-bitbucket'];
+  assert.equal(cfg.url, 'https://mcp.atlassian.com/v2/mcp');
+  assert.deepEqual(cfg.env_http_headers, { Authorization: 'ATLASSIAN_ATLASSIAN_BITBUCKET_AUTH' });
+  assert.ok(!JSON.stringify(fake().config).includes('ATATT'), 'token not in config');
+  assert.equal(srv.app.agents.codex.extraEnv.ATLASSIAN_ATLASSIAN_BITBUCKET_AUTH, `Basic ${Buffer.from('jack@example.com:ATATT-secret-123').toString('base64')}`);
+  assert.equal(bb.connection.state, 'connected');
+  const j = await api('/api/atlassian/connect', { purpose: 'jira', mode: 'oauth' });
+  assert.equal(j.status, 200, j.error);
+  assert.equal(fake().config.mcp_servers.atlassian.url, 'https://mcp.atlassian.com/v1/mcp/authv2');
+  const st = await api('/api/mcp/connection?name=atlassian');
+  assert.equal(st.ok, true);
+});
+
+test('MATLAB MCP: JSON imported as written and connected', async () => {
+  const json = JSON.stringify({ mcpServers: { 'matlab': { command: '/opt/mw/matlab-mcp-server', args: ['--matlab-session-mode=existing'] } } });
+  const r = await api('/api/matlab/mcp/import', { text: json });
+  assert.equal(r.status, 200, r.error);
+  assert.deepEqual(fake().config.mcp_servers.matlab, { command: '/opt/mw/matlab-mcp-server', args: ['--matlab-session-mode=existing'], enabled: true });
+  assert.equal(r.state, 'connected');
+  const c = await api('/api/matlab/mcp/connect', {});
+  assert.equal(c.ok, true);
+  const info = await api('/api/matlab/mcp');
+  assert.equal(info.imported.command, '/opt/mw/matlab-mcp-server');
+});
+
+test('MATLAB MCP: entry written by MathWorks setup in Codex is copied as is to Claude Code when the user picks it', async () => {
+  // Same shape as setupAgenticToolkit("install") → Codex → Globally: [mcp_servers.matlab] in config.toml.
+  const app = srv.app;
+  app.s.tools.matlab.mcpEntry = null; app.s.tools.matlab.agents = null;
+  const exe = 'C:\\Users\\jack\\.matlab\\agentic-toolkits\\bin\\matlab-mcp-server.exe';
+  await app.agents.codex.writeConfig([{ keyPath: 'mcp_servers.matlab', value: { command: exe, args: ['--matlab-session-mode=existing'], env: { MW_X: '1' } }, mergeStrategy: 'replace' }]);
+  const before = await api('/api/matlab/mcp');
+  assert.equal(before.askAgent, true, 'the agent question is asked until answered');
+  assert.deepEqual(before.agents, ['codex']);
+  assert.equal(before.sources[0].from, 'codex');
+  app.agents.claude.binSetting = path.join(here, 'fixtures', 'fake-claude.mjs');
+  try {
+    const r = await api('/api/matlab/mcp/connect', { agents: ['codex', 'claude'] });
+    assert.equal(r.status, 200, r.error);
+    assert.deepEqual(r.agents, ['codex', 'claude']);
+    const cj = JSON.parse(fs.readFileSync(path.join(process.env.CLAUDE_CONFIG_DIR, '.claude.json'), 'utf8'));
+    assert.deepEqual(cj.mcpServers.matlab, { type: 'stdio', command: exe, args: ['--matlab-session-mode=existing'], env: { MW_X: '1' } });
+    assert.equal(r.ok, true, r.detail);
+    assert.ok(r.notes.some((n) => /Codex: already configured/.test(n)), r.notes.join(' | '));
+    assert.equal(fake().config.mcp_servers.matlab.command, exe, 'Codex entry left as MathWorks wrote it');
+    const after = await api('/api/matlab/mcp');
+    assert.equal(after.askAgent, false);
+    assert.ok(after.inClaude && after.inCodex);
+    const bad = await api('/api/matlab/mcp/connect', { agents: ['gemini'] });
+    assert.equal(bad.status, 400);
+  } finally { app.agents.claude.binSetting = null; }
+});

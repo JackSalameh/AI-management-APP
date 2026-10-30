@@ -63,6 +63,12 @@ Settings from *Codex Projects Management* (earlier name) are imported automatica
   start (they are not shipped inside the app); you can also upload your own in *Configuration › Appearance*.
 - **Your models** — the model list shows what your account can use (★ = your default) with the reasoning levels
   available for each model; *↻ Detect my models again* refreshes it after you change plan or key.
+- **Your context files** — a `context.md` or `instructions.md` you already keep in a project folder (or its
+  parents) is read and sent to the AI automatically; the app's own memory files are only created if you agree.
+- **MATLAB, Jira and Bitbucket connected to the AI (MCP)** — in *Configuration › Tools*: for MATLAB, tick which
+  AI uses it (Codex, Claude Code or both); the configuration written by MathWorks' Agentic Toolkit setup is
+  copied as is and connected each time you launch MATLAB from the app. For Jira/Bitbucket, sign in with your
+  Atlassian account or an API token (kept in the system keychain).
 - **Files of a conversation** — the 📄 button lists files the agent changed or read, your attachments and the
   memory files, with preview and the diff made in this conversation.
 

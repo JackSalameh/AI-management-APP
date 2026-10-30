@@ -242,3 +242,51 @@ test('code highlighter never re-matches its own markup and escapes HTML', async 
   assert.equal((h.match(/<span/g) || []).length, 3, h);
   assert.ok(!highlightCode('<img src=x onerror=alert(1)>', 'js').includes('<img'));
 });
+
+
+test('MCP JSON is imported as written; credentials move to the keychain', async () => {
+  const { parseMcpJson, toCodexEntry } = await import('../lib/mcpjson.mjs');
+  const [m] = parseMcpJson(JSON.stringify({ mcpServers: { matlab: { command: 'C:\\Users\\me\\.matlab\\agentic-toolkits\\bin\\matlab-mcp-server.exe', args: ['--matlab-session-mode=existing', '--initial-working-folder=D:\\X1191'], env: { MW_LOG: '1' } } } }));
+  assert.equal(m.name, 'matlab');
+  const c = toCodexEntry(m);
+  assert.deepEqual(c.value, { command: 'C:\\Users\\me\\.matlab\\agentic-toolkits\\bin\\matlab-mcp-server.exe', args: ['--matlab-session-mode=existing', '--initial-working-folder=D:\\X1191'], enabled: true, env: { MW_LOG: '1' } });
+  assert.deepEqual(c.secrets, []);
+  const [v] = parseMcpJson(JSON.stringify({ servers: { gh: { type: 'http', url: 'https://x.test/mcp', headers: { Authorization: 'Bearer ghp_abc', 'X-Mode': 'ro' } } } }));
+  const cv = toCodexEntry(v);
+  assert.equal(cv.value.env_http_headers.Authorization, 'MCP_GH_AUTHORIZATION');
+  assert.deepEqual(cv.value.http_headers, { 'X-Mode': 'ro' });
+  assert.equal(cv.secrets[0].value, 'Bearer ghp_abc');
+  const ref = toCodexEntry(parseMcpJson('{"url":"https://a.test/mcp","headers":{"Authorization":"${MY_AUTH}"}}', 'a')[0]);
+  assert.deepEqual(ref.value.env_http_headers, { Authorization: 'MY_AUTH' }, 'env references kept');
+  const st = toCodexEntry(parseMcpJson('{"command":"x","env":{"JIRA_API_TOKEN":"t0k","JIRA_URL":"https://j"}}', 'j')[0]);
+  assert.deepEqual(st.value.env_vars, ['JIRA_API_TOKEN']); assert.deepEqual(st.value.env, { JIRA_URL: 'https://j' });
+  assert.throws(() => parseMcpJson('{"foo":1}'), /No MCP server/);
+  assert.throws(() => parseMcpJson('{bad'), /valid JSON/);
+});
+
+test('logo pack: ZIP reader and logomark choice', async () => {
+  const zlib = await import('node:zlib');
+  const { listZip, readEntry, pickLogomark } = await import('../lib/unzip.mjs');
+  const files = [['Bitbucket/Bitbucket-logo-lockup-blue.svg', '<svg>lockup</svg>'], ['Bitbucket/Bitbucket-logomark-blue.svg', '<svg>mark</svg>'], ['Bitbucket/Bitbucket-logomark-white.svg', '<svg>white</svg>'], ['__MACOSX/x.svg', 'junk']];
+  const locals = [], centrals = []; let off = 0;
+  for (const [name, txt] of files) {
+    const data = zlib.deflateRawSync(Buffer.from(txt)); const nb = Buffer.from(name);
+    const lh = Buffer.alloc(30); lh.writeUInt32LE(0x04034b50, 0); lh.writeUInt16LE(8, 8); lh.writeUInt32LE(data.length, 18); lh.writeUInt32LE(txt.length, 22); lh.writeUInt16LE(nb.length, 26);
+    const ch = Buffer.alloc(46); ch.writeUInt32LE(0x02014b50, 0); ch.writeUInt16LE(8, 10); ch.writeUInt32LE(data.length, 20); ch.writeUInt32LE(txt.length, 24); ch.writeUInt16LE(nb.length, 28); ch.writeUInt32LE(off, 42);
+    locals.push(lh, nb, data); centrals.push(ch, nb); off += 30 + nb.length + data.length;
+  }
+  const cd = Buffer.concat(centrals);
+  const end = Buffer.alloc(22); end.writeUInt32LE(0x06054b50, 0); end.writeUInt16LE(files.length, 10); end.writeUInt32LE(cd.length, 12); end.writeUInt32LE(off, 16);
+  const zip = Buffer.concat([...locals, cd, end]);
+  const entries = listZip(zip);
+  const pick = pickLogomark(entries);
+  assert.equal(pick.name, 'Bitbucket/Bitbucket-logomark-blue.svg');
+  assert.equal(readEntry(zip, pick).toString(), '<svg>mark</svg>');
+});
+
+test('UI: buttons are never re-enabled through e.currentTarget after an await (it is null by then)', () => {
+  const src = fs.readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
+  assert.equal((src.match(/e\.currentTarget\.disabled\s*=\s*false/g) || []).length, 0);
+  // any async handler that disables its button must keep a reference first
+  for (const m of src.matchAll(/async \(e\) => \{([\s\S]{0,400}?)await/g)) assert.ok(!/e\.currentTarget\.disabled = true/.test(m[1]), m[1].slice(0, 120));
+});

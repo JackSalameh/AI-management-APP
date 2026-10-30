@@ -347,3 +347,9 @@ body.mode-simple .pro-only { display: none !important; }
 
 .filespanel .li .fp-name { font-family: var(--mono); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: left; }
 .filespanel .list { max-height: none; }
+
+.mcp-box { margin-top: 10px; padding-top: 6px; border-top: 1px dashed var(--line); }
+.mcp-status { display: flex; align-items: center; gap: 7px; margin-top: 8px; font-size: 12.5px; padding: 6px 8px; border-radius: 6px; background: var(--panel-2); }
+.mcp-status.ok { background: var(--ok-soft); color: var(--ok); } .mcp-status.warn { background: var(--warn-soft); color: var(--warn); } .mcp-status.bad { background: var(--danger-soft); color: var(--danger); }
+.mcp-status .copy { border: 0; background: none; cursor: pointer; color: inherit; margin-left: auto; display: grid; }
+.mcp-status .copy .ic { width: 14px; height: 14px; }

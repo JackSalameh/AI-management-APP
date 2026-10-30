@@ -186,7 +186,7 @@ async function renderTop() {
   const needFolder = (fn) => () => { const f = curFolder(); if (!f) { toast(t('openFolder'), true); return; } fn(f); };
   const buttons = await Promise.all([
     toolBtn('vscode', 'VS Code', needFolder((f) => api('/api/tools/vscode', S.conv ? { key: S.conv.key } : { folder: f }).catch(fail))),
-    toolBtn('matlab', 'MATLAB', needFolder((f) => api('/api/tools/matlab', S.conv ? { key: S.conv.key } : { folder: f }).then((r) => toast(`MATLAB ${r.release}`)).catch(fail))),
+    toolBtn('matlab', 'MATLAB', needFolder((f) => api('/api/tools/matlab', S.conv ? { key: S.conv.key } : { folder: f }).then((r) => toast(`MATLAB ${r.release}${r.connecting ? ' — ' + t('mcpConnecting') : ''}`)).catch(fail))),
     toolBtn('git', t('gitPanel'), () => toggleGit()),
     toolBtn('bitbucket', `Bitbucket — ${t('pr')}`, needFolder(() => gitPR())),
     toolBtn('jira', 'Jira', jiraAction),
@@ -507,7 +507,10 @@ function highlightText(text) {
 async function askMemoryForExisting(key) {
   const dont = h('input', { type: 'checkbox' });
   let answered = false;
-  const m = modal({ title: t('memAskExisting'), body: h('div', {}, h('p', {}, t('memAskText')), h('label', { class: 'check' }, dont, h('span', {}, t('dontAskAgain')))),
+  const found = (S.conv?.key === key && S.conv.record.folderFiles) || [];
+  const m = modal({ title: t('memAskExisting'), body: h('div', {},
+    found.length ? h('div', { class: 'banner info' }, h('div', {}, h('div', {}, t('memFoundFiles')), ...found.map((f) => h('div', { class: 'mono' }, '✓ ' + f.split(/[\\/]/).pop())))) : null,
+    h('p', {}, t('memAskText')), h('label', { class: 'check' }, dont, h('span', {}, t('dontAskAgain')))),
     foot: [
       h('button', { class: 'btn', onclick: async () => { answered = true; m.close(); if (dont.checked) patchSettings({ askMemory: false }, true); await api('/api/conversation/memory-setup', { key, enable: false }).catch(fail); if (S.conv?.key === key) S.conv.record.memoryState = 'declined'; } }, t('noThanks')),
       h('button', { class: 'btn primary', onclick: () => { answered = true; m.close(); memorySetupDialog(key, { isNew: false }); } }, t('yesCreate'))],
@@ -693,10 +696,7 @@ function renderProject(hidden) {
   const head = h('div', { class: 'conv-head' }, hidden ? ib('sidebarOpen', t('showFolders'), () => toggleSidebar(false)) : null,
     h('div', { class: 'conv-title' }, h('h1', {}, d?.name || P.folder.split(/[\\/]/).filter(Boolean).pop()), h('div', { class: 'loc' }, P.folder)),
     h('button', { class: 'btn primary', onclick: () => newConversation(P.folder), html: icon('chatPlus') + t('newChat') }),
-    ib('folderOpen', t('openInExplorer'), () => api('/api/reveal', { path: P.folder }).catch(fail)),
-    S.sum.tools.vscode.enabled ? tib('vscode', 'VS Code', () => api('/api/tools/vscode', { folder: P.folder }).catch(fail)) : null,
-    S.sum.tools.matlab.enabled ? tib('matlab', 'MATLAB', () => api('/api/tools/matlab', { folder: P.folder }).then((r) => toast(`MATLAB ${r.release}`)).catch(fail)) : null,
-    S.sum.tools.git.enabled ? tib('git', t('gitPanel'), () => toggleGit()) : null);
+    ib('folderOpen', t('openInExplorer'), () => api('/api/reveal', { path: P.folder }).catch(fail)));
   const body = h('div', { class: 'stream' }, h('div', { class: 'hub' }));
   const grid = body.firstChild;
   if (P.error) grid.append(h('div', { class: 'errorbox' }, P.error));
@@ -1371,12 +1371,12 @@ function skillBox(folder) {
     field(t('installFrom'), src), h('button', { class: 'btn small', onclick: preview }, t('preview')), h('div', { class: 'help', style: { marginTop: '8px' } }, t('pickSkills')), list, field(t('scope'), scope),
     h('button', { class: 'btn primary', onclick: async (e) => {
       const select_ = [...list.querySelectorAll('input:checked')].map((i) => i.value);
-      e.currentTarget.disabled = true;
+      const btn = e.currentTarget; btn.disabled = true;
       try {
         const r = await api('/api/skills/install', { source: src.value.trim(), scope: scope.querySelector('select')?.value || 'global', folder: folder || S.conv?.record?.cwd || S.selFolder, select: found === null ? undefined : select_ });
         out.textContent = r.kind === 'plugin' ? r.message : r.results.map((x) => `${x.status === 'installed' ? '✓' : '•'} ${x.name} (${x.status})`).join('   ');
       } catch (err) { out.textContent = err.message; }
-      e.currentTarget.disabled = false;
+      btn.disabled = false;
     } }, t('installSelected')), out);
 }
 
@@ -1445,7 +1445,7 @@ const SETTINGS = {
     }));
     const apiCards = info.api.map((p) => h('div', { class: 'li' }, h('span', { html: icon('api') }),
       h('div', { class: 'grow' }, h('div', {}, p.label), h('div', { class: 'sub' }, `${p.baseUrl} · ${p.keyName ? (p.keySaved ? t('keySaved') : t('noKey')) : '—'}${p.models?.length ? ' · ' + p.models.join(', ') : ''}`)),
-      h('button', { class: 'btn small', onclick: async (e) => { e.currentTarget.disabled = true; try { const r = await api('/api/providers/test', { id: p.id }); toast(`${p.label}: ✓ ${r.models} — ${r.sample.join(', ')}`); } catch (err) { fail(err); } e.currentTarget.disabled = false; } }, t('test')),
+      h('button', { class: 'btn small', onclick: async (e) => { const btn = e.currentTarget; btn.disabled = true; try { const r = await api('/api/providers/test', { id: p.id }); toast(`${p.label}: ✓ ${r.models} — ${r.sample.join(', ')}`); } catch (err) { fail(err); } btn.disabled = false; } }, t('test')),
       h('button', { class: 'btn small', onclick: () => providerDialog(p) }, t('edit')),
       h('button', { class: 'btn small danger', onclick: async () => { if (await confirmBox({ title: t('remove'), text: p.label, danger: true })) { await api('/api/providers/remove', { id: p.id }).catch(fail); await loadState(false); openSettings('accounts'); } } }, t('remove'))));
     return [h('h3', {}, t('cliAgents')), h('div', { class: 'cards' }, ...cli),
@@ -1468,9 +1468,10 @@ const SETTINGS = {
       h('h3', { style: { marginTop: '18px' } }, t('officialIcons')), h('p', { class: 'help' }, t('fetchIconsHelp')),
       checkbox(t('autoIcons'), settings().autoIcons !== false, (v) => patchSettings({ autoIcons: v }, true)),
       h('button', { class: 'btn primary', html: icon('download') + t('fetchIcons'), onclick: async (e) => {
-        e.currentTarget.disabled = true; out.textContent = '…';
+        const btn = e.currentTarget; btn.disabled = true; out.textContent = '…';
         try { const r = await api('/api/icons/fetch', {}); S.sum.icons = r.icons; setLogos(S.sum.logos, S.sum.icons, TOKEN); renderTop(); out.textContent = r.results.map((x) => `${x.ok ? '✓' : '✕'} ${x.tool}${x.ok ? '' : ' — ' + x.error}`).join('   '); setTimeout(() => openSettings('appearance'), 1500); }
         catch (err) { out.textContent = err.message; }
+        btn.disabled = false;
       } }), out,
       h('div', { class: 'list', style: { marginTop: '10px' } }, ...rows)];
   },
@@ -1530,15 +1531,18 @@ const SETTINGS = {
         field(t('path'), input(T.matlab.executable, (v) => upd('matlab', { executable: v }), { placeholder: 'C:\\Program Files\\MATLAB\\R2026a\\bin\\matlab.exe' })),
         checkbox(t('initSimulink'), T.matlab.initSimulink, (v) => upd('matlab', { initSimulink: v })),
         checkbox(t('shareSession'), T.matlab.shareSession !== false, (v) => upd('matlab', { shareSession: v })),
-        field('MCP server name', input(T.matlab.mcpServer, (v) => upd('matlab', { mcpServer: v }))),
-        h('button', { class: 'btn', onclick: () => { const f = S.conv?.record?.cwd || S.selFolder; if (!f) return toast(t('openFolder'), true); api('/api/tools/matlab', { folder: f, setup: true }).then((r) => toast(`MATLAB ${r.release}`)).catch(fail); } }, t('runSetup'))),
+        h('button', { class: 'btn', onclick: () => { const f = S.conv?.record?.cwd || S.selFolder; if (!f) return toast(t('openFolder'), true); api('/api/tools/matlab', { folder: f, setup: true }).then((r) => toast(`MATLAB ${r.release}`)).catch(fail); } }, t('runSetup')),
+        matlabMcpBox(T)),
       await card('git', 'Git', t('gitHelp'), h('div', { class: 'help' }, info.git.available ? '✓ git' : '✕ git not found'), field(t('path'), input(T.git.executable, (v) => upd('git', { executable: v }), { placeholder: 'git' }))),
       await card('bitbucket', 'Bitbucket', t('bitbucketHelp'),
         field('Type', select([['cloud', t('flavorCloud')], ['server', t('flavorServer')]], T.bitbucket.flavor, (v) => upd('bitbucket', { flavor: v }))),
         field(t('baseUrl'), input(T.bitbucket.baseUrl, (v) => upd('bitbucket', { baseUrl: v }))),
         field(t('defaultBranch'), input(T.bitbucket.defaultBranch, (v) => upd('bitbucket', { defaultBranch: v }), { placeholder: 'main' })),
-        h('div', { class: 'hint' }, 'SSH: ssh-keygen -t ed25519 -C "you@example.com" → add ~/.ssh/id_ed25519.pub to Bitbucket › Personal settings › SSH keys → ssh -T git@bitbucket.org')),
+        h('div', { class: 'hint' }, 'SSH: ssh-keygen -t ed25519 -C "you@example.com" → add ~/.ssh/id_ed25519.pub to Bitbucket › Personal settings › SSH keys → ssh -T git@bitbucket.org'),
+        T.bitbucket.flavor === 'server' ? h('p', { class: 'help' }, t('bbServerNoMcp')) : atlassianBox('bitbucket', T)),
       await card('jira', 'Jira', t('jiraHelp'),
+        atlassianBox('jira', T),
+        h('details', {}, h('summary', { class: 'help', style: { cursor: 'pointer' } }, t('jiraOther')),
         field('Mode', jmode), remoteBox, localBox, field(t('token'), jtok),
         h('div', { class: 'inline' },
           h('button', { class: 'btn primary', onclick: async () => {
@@ -1549,7 +1553,7 @@ const SETTINGS = {
               await loadState(false); renderTop();
             } catch (e) { fail(e); }
           } }, t('save')),
-          h('button', { class: 'btn', onclick: () => api('/api/jira/login', {}).then(() => toast(t('signIn'))).catch(fail) }, t('signIn'))),
+          h('button', { class: 'btn', onclick: () => api('/api/jira/login', {}).then(() => toast(t('signIn'))).catch(fail) }, t('signIn')))),
         h('details', {}, h('summary', { class: 'help', style: { cursor: 'pointer' } }, t('askManager')), h('div', { class: 'hint' }, t('jiraChecklist')), h('button', { class: 'btn small', style: { marginTop: '6px' }, onclick: () => copyText(t('jiraChecklist')), html: icon('copy') + t('copyPath').split(' ')[0] }))))];
   },
 
@@ -1564,13 +1568,13 @@ const SETTINGS = {
     return [h('h3', {}, t('skills')),
       field(t('installFrom'), src), field(t('scope'), scope), h('label', { class: 'check' }, replace, h('span', {}, 'Replace existing (a backup is kept)')),
       h('button', { class: 'btn primary', onclick: async (e) => {
-        e.currentTarget.disabled = true;
+        const btn = e.currentTarget; btn.disabled = true;
         try {
           const r = await api('/api/skills/install', { source: src.value, scope: scope.value, folder, replace: replace.checked });
           if (r.kind === 'plugin') { mkt.value = r.source; toast(r.message); }
           else out.replaceChildren(h('div', { class: 'list' }, ...r.results.map((x) => h('div', { class: 'li' }, h('span', {}, x.status === 'installed' ? '✓' : '•'), h('div', { class: 'grow' }, h('div', {}, x.name), h('div', { class: 'sub' }, x.path)), h('span', { class: 'badge' }, x.status)))));
         } catch (err) { fail(err); }
-        e.currentTarget.disabled = false;
+        btn.disabled = false;
       } }, t('install')), out,
       h('h3', { style: { marginTop: '18px' } }, `Skills (${sk.skills.length})`),
       sk.error ? h('div', { class: 'help' }, sk.error) : null,
@@ -1619,6 +1623,84 @@ function pluginBlock(m) {
     p.installed ? h('span', { class: 'badge' }, '✓')
       : h('button', { class: 'btn small', onclick: () => api('/api/plugins/install', { marketplacePath: m.path, pluginName: p.name }).then(() => openSettings('skills')).catch(fail) }, t('install')));
   return h('div', { style: { marginTop: '8px' } }, h('div', { class: 'gp-section', style: { margin: '6px 0' } }, m.name), h('div', { class: 'list' }, ...m.plugins.map(row)));
+}
+
+/** "Connection to the agents (MCP)" block: live status, connect, refresh. */
+function mcpStatusLine(name, label) {
+  const line = h('div', { class: 'mcp-status help' }, '…');
+  const draw = (c) => {
+    const cls = c.ok ? 'ok' : c.state === 'needs-login' || c.state === 'waiting' ? 'warn' : 'bad';
+    line.className = `mcp-status ${cls}`;
+    line.replaceChildren(h('span', { class: `dot ${c.ok ? 'ready' : cls === 'warn' ? 'starting' : 'error'}` }), h('span', {}, `${label || c.name || name}: ${t('mcp_' + (c.state || 'missing'))}${c.detail ? ' — ' + c.detail : ''}`),
+      h('button', { class: 'copy', 'data-tip': t('refresh'), html: icon('refresh'), onclick: () => { if (c.name || name) name = c.name || name; return (label === 'MATLAB' ? api('/api/matlab/mcp/connect', {}) : api('/api/mcp/connection' + q({ name, wait: 8 }))).then(draw).catch(fail); } }));
+  };
+  if (name) api('/api/mcp/connection' + q({ name })).then(draw).catch(() => draw({ state: 'missing' })); else draw({ state: 'missing' });
+  line.draw = draw;
+  return line;
+}
+
+function atlassianBox(purpose, T) {
+  const cfg = T[purpose];
+  const name = purpose === 'bitbucket' ? 'atlassian-bitbucket' : (T.jira.serverName || 'atlassian');
+  const modes = purpose === 'bitbucket' ? [['token', t('atlToken')], ['service', t('atlService')]] : [['oauth', t('atlOauth')], ['token', t('atlToken')], ['service', t('atlService')]];
+  const mode = select(modes, cfg.mcpMode || modes[0][0], () => sync());
+  const email = h('input', { class: 'input', value: cfg.email || '', placeholder: 'you@company.com', spellcheck: 'false' });
+  const token = h('input', { class: 'input', type: 'password', autocomplete: 'new-password', placeholder: cfg.mcpMode && cfg.mcpMode !== 'oauth' ? '•••••• (' + t('keySaved') + ')' : '' });
+  const emailF = field(t('email'), email), tokenF = field(t('atlTokenLabel'), token);
+  const status = mcpStatusLine(cfg.mcpName || name);
+  const notes = h('div', { class: 'help' });
+  const sync = () => { emailF.classList.toggle('hidden', mode.value !== 'token'); tokenF.classList.toggle('hidden', mode.value === 'oauth'); };
+  sync();
+  return h('div', { class: 'mcp-box' }, h('div', { class: 'gp-section' }, t('mcpConnection')),
+    h('p', { class: 'help' }, purpose === 'bitbucket' ? t('bbMcpHelp') : t('jiraMcpHelp')),
+    field(t('atlAuth'), mode), emailF, tokenF,
+    h('div', { class: 'inline' }, h('button', { class: 'btn primary small', onclick: async (e) => {
+      const btn = e.currentTarget; btn.disabled = true; notes.textContent = '…';
+      try { const r = await api('/api/atlassian/connect', { purpose, mode: mode.value, email: email.value.trim(), token: token.value.trim() || undefined }); token.value = ''; notes.textContent = r.notes.join(' · '); status.draw(r.connection); S.sum.tools = (await api('/api/state')).tools; renderTop(); }
+      catch (err) { notes.textContent = err.message; }
+      btn.disabled = false;
+    } }, t('connect')),
+      h('a', { class: 'help', href: 'https://id.atlassian.com/manage-profile/security/api-tokens', target: '_blank', rel: 'noopener noreferrer' }, `${t('getKey')} ↗`)),
+    status, notes);
+}
+
+function matlabMcpBox(T) {
+  const box = h('div', { class: 'mcp-box' }, h('div', { class: 'gp-section' }, t('mcpConnection')), h('div', { class: 'help' }, '…'));
+  (async () => {
+    let info; try { info = await api('/api/matlab/mcp'); } catch (e) { box.append(h('div', { class: 'errorbox' }, e.message)); return; }
+    const status = mcpStatusLine(info.inCodex ? info.name : null, 'MATLAB');
+    const notes = h('div', { class: 'help' });
+    const show = (r) => { status.draw(r); notes.textContent = (r.notes || []).join(' · '); };
+    // The only question: which agent(s) will use MATLAB. The server definition is copied as is.
+    const picked = new Set(info.agents.length ? info.agents : ['codex']);
+    const agentBox = (id, label, disabled) => h('label', { class: 'check' }, h('input', { type: 'checkbox', checked: picked.has(id), disabled, 'data-agent': id, onchange: (e) => { e.target.checked ? picked.add(id) : picked.delete(id); } }), h('span', {}, label));
+    const where = { codex: 'Codex · config.toml', claude: 'Claude Code · ~/.claude.json', imported: t('mcpImported'), json: 'JSON', binary: t('mcpDetected') };
+    const srcList = info.sources.length
+      ? h('div', { class: 'hint' }, ...info.sources.map((x, i) => h('div', {}, `${i === 0 ? '★ ' : ''}${where[x.from]}: ${x.command || ''} ${(x.args || []).join(' ')}`)))
+      : h('div', { class: 'errorbox' }, t('mcpNotFound'));
+    const connect = async (e) => {
+      if (!picked.size) return toast(t('pickAgent'), true);
+      const btn = e.currentTarget; btn.disabled = true; notes.textContent = '…';
+      try { show(await api('/api/matlab/mcp/connect', { agents: [...picked] })); } catch (err) { notes.textContent = err.message; }
+      btn.disabled = false;
+    };
+    const paste = h('textarea', { class: 'input', rows: 4, placeholder: '{ "mcpServers": { "matlab": { "command": "…\\\\matlab-mcp-server.exe", "args": [ … ] } } }', spellcheck: 'false' });
+    const doImport = async (body) => { notes.textContent = '…'; try { show(await api('/api/matlab/mcp/import', { ...body, agents: [...picked] })); } catch (e) { notes.textContent = e.message; } };
+    box.replaceChildren(h('div', { class: 'gp-section' }, t('mcpConnection')), h('p', { class: 'help' }, t('matlabMcpHelp')),
+      info.askAgent ? h('div', { class: 'banner info' }, t('matlabWhichAgent')) : null,
+      h('div', { class: 'field' }, h('span', {}, t('matlabAgents')), h('div', { class: 'inline' }, agentBox('codex', 'Codex'), agentBox('claude', 'Claude Code', !info.claudeInstalled))),
+      h('div', { class: 'help' }, t('mcpSources')), srcList,
+      checkbox(t('connectOnLaunch'), T.matlab.connectMcp !== false, (v) => api('/api/tools', { tool: 'matlab', patch: { connectMcp: v } }).then((r) => { S.sum.tools = r.tools; }).catch(fail)),
+      h('div', { class: 'inline' }, h('button', { class: 'btn primary small', onclick: connect }, t('copyAndConnect'))),
+      h('details', {}, h('summary', { class: 'help', style: { cursor: 'pointer' } }, t('mcpImportJson')),
+        ...info.jsons.map((f) => h('button', { class: 'btn small', style: { margin: '2px 4px 2px 0' }, onclick: () => doImport({ file: f }) }, f.split(/[\\/]/).slice(-2).join('/'))),
+        paste,
+        h('div', { class: 'inline' }, h('button', { class: 'btn small', onclick: () => doImport({ text: paste.value }) }, t('importJson')),
+          h('button', { class: 'btn small', onclick: async () => { const f = await readFileAsText('.json'); if (f) { paste.value = f.text; doImport({ text: f.text }); } } }, t('chooseFile')))),
+      h('details', {}, h('summary', { class: 'help', style: { cursor: 'pointer' } }, t('matlabSetupHow')), h('pre', { class: 'hint' }, 'setupAgenticToolkit("install")\n→ 3 (Both) → Y\n→ Configure your coding agent: Y → 1 Claude Code / 3 Codex\n→ 1 Globally → 3 (Both) → all → all → Y\n\n' + t('matlabEachSession') + '\naddpath(fullfile(getenv("USERPROFILE"), ".matlab", "agentic-toolkits", "simulink"))\nsatk_initialize\nshareMATLABSession')),
+      status, notes);
+  })();
+  return box;
 }
 
 /** "Test" button + results list for one integration (rec. 7). */
@@ -1726,6 +1808,7 @@ function onEvent(e) {
     case 'addons.changed': S.addonsRefresh?.(); break;
     case 'icons.updated': S.sum.icons = e.icons; setLogos(S.sum.logos, S.sum.icons, TOKEN); renderTop(); if (S.conv || S.project) renderMain(); break;
     case 'files.changed': if (isActive && S.filesOpen) loadFiles(); break;
+    case 'mcp.connection': toast(`${e.label || e.name}: ${t('mcp_' + e.state)}${e.detail ? ' — ' + e.detail : ''}`, !e.ok && e.state !== 'needs-login' && e.state !== 'waiting'); break;
     default: break;
   }
 }

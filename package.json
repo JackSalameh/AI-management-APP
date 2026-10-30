@@ -1,6 +1,6 @@
 {
   "name": "ai-management-app",
-  "version": "3.1.0",
+  "version": "3.2.0",
   "description": "One workbench for AI agents and providers (Codex, Claude Code, Gemini CLI, OpenAI, Anthropic, Google, Mistral, OpenRouter, Ollama, OmniRoute\u2026): projects, conversations, memory, skills, connectors, Git, VS Code, MATLAB and Jira.",
   "author": "Jack Salameh <jacksalameh@live.com>",
   "license": "UNLICENSED",
