@@ -7,3 +7,6 @@ data/
 .cpm/
 .cpm-trash/
 *.tmp
+
+# One-time local setup helpers (history bundle, GitHub setup script) — kept on this PC only
+setup/
