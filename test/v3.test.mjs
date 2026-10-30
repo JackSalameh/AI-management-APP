@@ -42,6 +42,13 @@ const stub = http.createServer((req, res) => {
     if (req.url === '/an/v1/messages') return sse([{ type: 'message_start' }, { type: 'content_block_delta', delta: { type: 'text_delta', text: `AN:${j.messages.at(-1).content}` } }, { type: 'message_delta', usage: { input_tokens: 3, output_tokens: 4 } }]);
     if (req.url.startsWith('/ge/v1beta/models?')) return res.end(JSON.stringify({ models: [{ name: 'models/gemini-q', supportedGenerationMethods: ['generateContent'] }, { name: 'models/embed', supportedGenerationMethods: ['embedContent'] }] }));
     if (req.url.startsWith('/ge/v1beta/models/gemini-q:streamGenerateContent')) return sse([{ candidates: [{ content: { parts: [{ text: `GE:${j.contents.at(-1).parts.at(-1).text}` }] } }], usageMetadata: { totalTokenCount: 9 } }]);
+    if (req.url === '/mem/v1/chat/completions') {
+      // Answers a memory-update request with one block per listed file (and one file it was not asked for).
+      const text = j.messages.at(-1).content;
+      const files = text.includes('=== FILE:') ? [...text.split('Files:')[1].matchAll(/^- (.+)$/gm)].map((m) => m[1]) : [];
+      const out = files.length ? [...files, '/etc/evil.md'].map((f) => `=== FILE: ${f} ===\nUPDATED ${path.basename(f)}\n=== END FILE ===`).join('\n') : `MEM:${text}`;
+      return sse([{ choices: [{ delta: { content: out } }] }]);
+    }
     if (req.url === '/slow/v1/chat/completions') { res.writeHead(200, { 'content-type': 'text/event-stream' }); res.write(`data: ${JSON.stringify({ choices: [{ delta: { content: 'partial' } }] })}\n\n`); return; }
     res.writeHead(404); res.end('{}');
   });
@@ -250,7 +257,9 @@ test('conversation files: changed, read, attached and memory files; preview limi
   assert.ok(f.changed[0].lastDiff.includes('+hi'));
   assert.deepEqual(f.read.map((x) => x.path), [path.join(folder, 'notes.md')]);
   assert.equal(f.attachments[0].name, 'data.csv');
-  assert.ok(f.memory.some((m) => m.label === 'CONTEXT.md'));
+  assert.ok(f.memory.some((m) => m.label === 'CONTEXT.md' && m.loaded));
+  assert.ok(['notes.md', 'a.txt', 'CONTEXT.md'].every((n) => f.folder.some((x) => x.rel === n)), 'folder contents listed');
+  assert.ok(f.folder.find((x) => x.rel === 'CONTEXT.md').memory);
   assert.equal((await api(`/api/conversation/file?key=${encodeURIComponent(n.key)}&file=${encodeURIComponent(path.join(folder, 'notes.md'))}`)).text, '# notes');
   assert.equal((await api(`/api/conversation/file?key=${encodeURIComponent(n.key)}&file=${encodeURIComponent(att.path)}`)).text, 'x,y\n1,2');
   assert.equal((await api(`/api/conversation/file?key=${encodeURIComponent(n.key)}&file=${encodeURIComponent('/etc/hostname')}`)).status, 403);
@@ -339,4 +348,91 @@ test('MATLAB MCP: entry written by MathWorks setup in Codex is copied as is to C
     const bad = await api('/api/matlab/mcp/connect', { agents: ['gemini'] });
     assert.equal(bad.status, 400);
   } finally { app.agents.claude.binSetting = null; }
+});
+
+
+test('every N prompts the app asks to update context/instructions; auto update by Codex and by an API chat', async () => {
+  await api('/api/settings', { memoryAskEvery: 5, memoryUpdateMode: 'ask' });
+  assert.equal((await api('/api/settings', { memoryAskEvery: 3 })).status, 400, 'only 5–10 or never');
+  const folder = path.join(work, 'Periodic');
+  fs.mkdirSync(folder, { recursive: true });
+  fs.writeFileSync(path.join(folder, 'context.md'), '# Context\nBench A');
+  const n = await api('/api/conversation/new', { folder });
+  const asks = [];
+  for (let i = 1; i <= 5; i++) { events = []; const r = await api('/api/conversation/send', { key: n.key, text: `step ${i}` }); asks.push(r.askMemoryUpdate); await waitFor((e) => e.type === 'turn.completed' && e.key === n.key); }
+  assert.deepEqual(asks, [false, false, false, false, true]);
+  events = [];
+  const u = await api('/api/memory/update', { key: n.key, choice: 'auto' });
+  assert.equal(u.status, 200, u.error);
+  assert.equal(u.mode, 'agent-edits');
+  await waitFor((e) => e.type === 'turn.completed' && e.key === n.key);
+  const sent = fake().threads[n.key.split(':')[1]].lastTurnParams.text;
+  assert.match(sent, /Memory update/); assert.ok(sent.includes(path.join(folder, 'context.md')));
+  assert.match(sent, /<cpm-shared-context>/, 'current content sent with the request');
+  events = []; const after = await api('/api/conversation/send', { key: n.key, text: 'next' });
+  assert.equal(after.askMemoryUpdate, false, 'counter restarted'); await waitFor((e) => e.type === 'turn.completed' && e.key === n.key);
+  // API chat: the AI returns the files, the app writes only the requested ones.
+  const p = await api('/api/providers/save', { preset: 'custom', label: 'Mem writer', baseUrl: `${SB}/mem/v1`, keyName: '', models: ['m'] });
+  const agent = `api-${p.provider.id}`;
+  const f2 = path.join(work, 'PeriodicApi'); fs.mkdirSync(f2, { recursive: true });
+  const c = await api('/api/conversation/new', { agent, folder: f2, modelKey: `${agent}:m` });
+  await api('/api/conversation/memory-setup', { key: c.key, enable: true, context: 'x', instructions: 'y' });
+  events = [];
+  const u2 = await api('/api/memory/update', { key: c.key, choice: 'auto' });
+  assert.equal(u2.mode, 'app-writes');
+  const done = await waitFor((e) => e.type === 'memory.updated' && e.key === c.key);
+  assert.deepEqual(done.files.map((f) => path.basename(f)).sort(), ['CONTEXT.md', 'INSTRUCTIONS.md']);
+  assert.equal(fs.readFileSync(path.join(f2, 'CONTEXT.md'), 'utf8'), 'UPDATED CONTEXT.md\n');
+  assert.ok(!fs.existsSync('/etc/evil.md'));
+  const r3 = await api('/api/memory/update', { key: c.key, choice: 'later', remember: true });
+  assert.equal(r3.choice, 'later');
+  await api('/api/settings', { memoryAskEvery: 7 });
+});
+
+test('Spec Kit: set up a folder (specify init), phases run natively in Codex, as instructions for API chats, progress from tasks.md', async () => {
+  process.env.FAKE_SPECIFY_LOG = path.join(root, 'specify.log');
+  const folder = path.join(work, 'SpecProj'); fs.mkdirSync(folder, { recursive: true });
+  const conv = await api('/api/conversation/new', { folder });
+  let st = await api(`/api/spec?folder=${encodeURIComponent(folder)}`);
+  assert.equal(st.initialized, false); assert.equal(st.specifyInstalled, true);
+  events = [];
+  const j = await api('/api/spec/init', { folder, agent: 'codex' });
+  assert.equal(j.status, 200, j.error);
+  await waitFor((e) => e.type === 'job.update' && e.job.id === j.job && e.job.status !== 'running');
+  assert.match(fs.readFileSync(process.env.FAKE_SPECIFY_LOG, 'utf8'), /^init --here --force --non-interactive --integration codex --ignore-agent-tools --script (sh|ps)$/m);
+  st = await api(`/api/spec?folder=${encodeURIComponent(folder)}`);
+  assert.equal(st.initialized, true); assert.equal(st.integration, 'codex');
+  assert.equal(st.constitution.filled, false, 'template constitution not yet written');
+  // Codex conversation: native skill call
+  let ph = await api('/api/spec/phase', { key: conv.key, phase: 'specify', args: 'Measure MTF with a slanted edge' });
+  assert.equal(ph.text, '$speckit-specify Measure MTF with a slanted edge');
+  // API chat in the same folder: the phase instructions themselves, with the input filled in
+  const p = await api('/api/providers/save', { preset: 'custom', label: 'Spec API', baseUrl: `${SB}/oa/v1`, keyName: '', models: ['gpt-x'] });
+  const apiConv = await api('/api/conversation/new', { agent: `api-${p.provider.id}`, folder, modelKey: `api-${p.provider.id}:gpt-x` });
+  ph = await api('/api/spec/phase', { key: apiConv.key, phase: 'specify', args: 'Measure MTF' });
+  assert.match(ph.text, /^Spec Kit — specify phase/); assert.match(ph.text, /Measure MTF\n/); assert.doesNotMatch(ph.text, /name: "speckit-specify"/, 'front matter removed');
+  assert.equal((await api('/api/spec/phase', { key: conv.key, phase: 'rm -rf' })).status, 400);
+  // a feature with tasks: progress and next step
+  const feat = path.join(folder, 'specs', '001-mtf'); fs.mkdirSync(feat, { recursive: true });
+  fs.writeFileSync(path.join(feat, 'spec.md'), '# Spec'); fs.writeFileSync(path.join(feat, 'plan.md'), '# Plan');
+  fs.writeFileSync(path.join(feat, 'tasks.md'), '- [x] T001 a\n- [X] T002 b\n- [ ] T003 c\n');
+  st = await api(`/api/spec?folder=${encodeURIComponent(folder)}`);
+  assert.deepEqual(st.features[0].progress, { total: 3, done: 2 });
+  assert.equal(st.features[0].next, 'implement');
+  const hub = await api(`/api/project?folder=${encodeURIComponent(folder)}`);
+  assert.equal(hub.spec.features.length, 1);
+});
+
+test('Ways of working: Ponytail plugin installed in Codex from its marketplace; REA added as an MCP server', async () => {
+  events = [];
+  const r = await api('/api/addons/install', { id: 'ponytail', targets: ['codex'] });
+  const done = await waitFor((e) => e.type === 'job.update' && e.job.id === r.job && e.job.status !== 'running', 10_000);
+  assert.equal(done.job.status, 'done', done.job.log);
+  assert.match(done.job.log, /marketplace “ponytail” added/);
+  assert.deepEqual(fake().pluginInstalls.at(-1), { marketplacePath: '/plugins/ponytail/marketplace.json', pluginName: 'ponytail' });
+  assert.equal((await api('/api/addons')).catalog.find((c) => c.id === 'ponytail').installed, true);
+  events = [];
+  const r2 = await api('/api/addons/install', { id: 'rea', targets: ['codex'] });
+  await waitFor((e) => e.type === 'job.update' && e.job.id === r2.job && e.job.status !== 'running', 10_000);
+  assert.deepEqual(fake().config.mcp_servers.rea, { command: 'npx', args: ['-y', 'rea-agents@6.8.0', 'mcp'], enabled: true });
 });

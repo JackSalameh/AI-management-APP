@@ -290,3 +290,10 @@ test('UI: buttons are never re-enabled through e.currentTarget after an await (i
   // any async handler that disables its button must keep a reference first
   for (const m of src.matchAll(/async \(e\) => \{([\s\S]{0,400}?)await/g)) assert.ok(!/e\.currentTarget\.disabled = true/.test(m[1]), m[1].slice(0, 120));
 });
+
+test('Codex agent refuses to start once the app is closing (no orphan app-server after quit)', async () => {
+  const { CodexAgent } = await import('../lib/agents/codex.mjs');
+  const a = new CodexAgent({ codexHome: os.tmpdir(), bin: 'definitely-not-installed' });
+  a.closed = true;
+  await assert.rejects(() => a.start(), /closing/);
+});

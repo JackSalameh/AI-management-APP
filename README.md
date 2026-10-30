@@ -63,6 +63,10 @@ Settings from *Codex Projects Management* (earlier name) are imported automatica
   start (they are not shipped inside the app); you can also upload your own in *Configuration › Appearance*.
 - **Your models** — the model list shows what your account can use (★ = your default) with the reasoning levels
   available for each model; *↻ Detect my models again* refreshes it after you change plan or key.
+- **Connections** (plug icon) — connect Jira, Bitbucket, Git accounts and MATLAB once; then work with issues,
+  repositories and pull requests in the app, hand them to the AI in one click, clone and publish repositories.
+- **Checkpoints** — before each message the folder's files are saved (Git folders); restore them if the AI went wrong.
+- **Spec-driven development** — Spec Kit in the project overview: specify → plan → tasks → implement, with progress.
 - **Your context files** — a `context.md` or `instructions.md` you already keep in a project folder (or its
   parents) is read and sent to the AI automatically; the app's own memory files are only created if you agree.
 - **MATLAB, Jira and Bitbucket connected to the AI (MCP)** — in *Configuration › Tools*: for MATLAB, tick which

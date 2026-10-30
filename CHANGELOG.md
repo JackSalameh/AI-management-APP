@@ -1,5 +1,51 @@
 # Changelog
 
+## 3.3.0 — 2026-10-30
+
+### New
+- **Connections menu** (plug icon in the top bar), one place to connect everything once:
+  - **Jira**: site + e-mail + API token, checked before anything is saved; the AI agents get the same access
+    (Atlassian MCP). **Jira panel**: my open issues / reported / watching / recent, project filter, text or key
+    search, issue detail (description, comments, sub-tasks), comment, change status, assign to me, create issue,
+    and **“Work on it with the AI”** (the issue goes to the conversation).
+  - **Bitbucket Cloud**: e-mail + scoped API token (also used by Git over HTTPS and by the agents). **Bitbucket
+    panel**: workspaces, repositories, pull requests (open / merged / declined) with their diff, approve, comment,
+    merge, decline, **“Review with the AI”**, clone in one click, pull request from the current folder.
+  - **Git**: commit identity (user.name / user.email), accounts for GitHub, GitLab, Bitbucket, Azure DevOps or a
+    company server with an HTTPS token (kept in the keychain, given to Git per command, never on a command line),
+    an SSH key (create, copy, test) or the computer's credential manager; **my repositories** with one-click
+    clone into a folder (added to the Explorer); **publish a folder** (init, create the repository on
+    GitHub/GitLab/Bitbucket or paste an address, push). Git panel: Publish… and Accounts buttons; pull requests
+    to bitbucket.org are created through the API when Bitbucket is connected.
+  - **MATLAB**: the MCP connection card (which agent, copied configuration, live state).
+- **Your context files are found and loaded**: any `context.md` / `instructions.md` (any case, also
+  `projet_context.md`, `Context X1191.md`, `contexte.md`, `consignes.md`…) in the conversation folder, its
+  `docs/`, `context/`, `memory/`… sub-folders and up to six parent folders. A **“Loaded: …”** bar under the title
+  shows them (click to edit); the memory workspace lists the folders searched.
+- **Asked only when needed**: when the conversation's folder has no such file, the app asks once whether to
+  create `CONTEXT.md` and `INSTRUCTIONS.md` — now as visible files in that folder; “No” creates nothing. The new
+  conversation window shows the files already found and can append to them.
+- **Keep the files up to date**: every 5–10 prompts (Configuration › General, or never) the app asks whether to
+  update them **automatically** (Codex / Claude Code edit the files; for API chats the AI returns the new content
+  and the app writes only the expected files) or **manually** (editor), or later; the choice can be remembered.
+- **Files panel**: new “In this folder” section (folder contents, two levels) with the loaded files marked.
+- **Ways of working** (Add-ons): **Spec Kit** (GitHub; installed with uv or pipx), **Ponytail** (write less code)
+  and **ECC** (agents, skills, hooks) installed as plugins in Codex and Claude Code, **REA** (reverse engineering,
+  MCP server pinned to rea-agents 6.8.0).
+- **Spec-driven development card** in the project overview: set up Spec Kit in the folder for Codex or Claude
+  Code, run each phase (principles, specify, clarify, plan, tasks, analyze, implement) — natively as a skill for
+  Codex/Claude Code, as instructions for API chats — and follow each feature's documents and task progress.
+- **Checkpoints**: before each message, the files of a Git folder are snapshotted (private refs, branch/index/
+  history untouched); preview what changed and restore, with an automatic safety checkpoint to undo.
+- **Desktop notifications** (opt-in) when a reply ends or needs approval while the window is in the background.
+- This repository now uses Spec Kit itself: `.specify/memory/constitution.md` (from INSTRUCTIONS.md) and
+  `specs/003-connections-memory-workflows/` (spec, plan, tasks of this release).
+
+### Fixed
+- Context/instruction files kept directly in a folder were never read (only the app's hidden `.cpm/` files).
+- Git panel “Add remote” called an operation the server did not implement.
+- Jira/Bitbucket buttons required ticking the tool first; they now open the panel or the Connections menu.
+
 ## 3.2.0 — 2026-10-30
 
 ### New

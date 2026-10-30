@@ -182,14 +182,16 @@ async function renderTop() {
     const b = h('button', { class: `ibtn ${on ? '' : 'off'}`, 'data-tip': `${label}${on ? '' : ' — ' + t('enabled').toLowerCase() + ': ✕'}`, 'aria-label': label, html: await toolIcon(id), onclick: on ? onclick : () => openSettings('tools', id) });
     return b;
   };
+  // Jira and Bitbucket open their panel once connected, otherwise the Connections menu (no need to tick them first).
+  const connBtn = async (id, label, open) => h('button', { class: 'ibtn', 'data-tip': label, 'aria-label': label, html: await toolIcon(id), onclick: () => open().catch?.(fail) });
   const curFolder = () => S.conv?.record?.cwd || S.selFolder;
   const needFolder = (fn) => () => { const f = curFolder(); if (!f) { toast(t('openFolder'), true); return; } fn(f); };
   const buttons = await Promise.all([
     toolBtn('vscode', 'VS Code', needFolder((f) => api('/api/tools/vscode', S.conv ? { key: S.conv.key } : { folder: f }).catch(fail))),
     toolBtn('matlab', 'MATLAB', needFolder((f) => api('/api/tools/matlab', S.conv ? { key: S.conv.key } : { folder: f }).then((r) => toast(`MATLAB ${r.release}${r.connecting ? ' — ' + t('mcpConnecting') : ''}`)).catch(fail))),
     toolBtn('git', t('gitPanel'), () => toggleGit()),
-    toolBtn('bitbucket', `Bitbucket — ${t('pr')}`, needFolder(() => gitPR())),
-    toolBtn('jira', 'Jira', jiraAction),
+    connBtn('bitbucket', 'Bitbucket', openBitbucketPanel),
+    connBtn('jira', 'Jira', openJiraPanel),
   ]);
   const lang = getLang();
   $.top.replaceChildren(
@@ -201,6 +203,7 @@ async function renderTop() {
     h('button', { class: 'langsel', 'data-tip': t('language'), onclick: (e) => showMenu(e.currentTarget, Object.entries(LANGS).map(([k, v]) => ({ label: v.name, html: FLAGS[k], cls: 'flagopt', run: () => changeLang(k) }))), html: FLAGS[lang] + `<span>${lang.toUpperCase()}</span>` }),
     ib(document.documentElement.dataset.theme === 'dark' ? 'sun' : 'moon', t('theme'), () => { patchSettings({ theme: document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark' }, true); applyTheme(); renderTop(); }),
     ib('search', t('searchAll') + ' (Ctrl+K)', () => openSearch()),
+    ib('plug', t('connections'), () => openConnections()),
     ib('puzzle', t('addons'), () => openAddons()),
     h('button', { class: 'langsel', 'data-tip': t('simpleHelp'), onclick: () => { const m = (settings().uiMode || 'simple') === 'simple' ? 'pro' : 'simple'; patchSettings({ uiMode: m }, true); document.body.classList.toggle('mode-simple', m === 'simple'); renderAll(); } }, (settings().uiMode || 'simple') === 'simple' ? t('simpleMode') : t('proMode')),
     ib('gear', t('configuration'), () => openSettings()),
@@ -406,6 +409,7 @@ async function newConversation(folder, opts = {}) {
   const ins = h('textarea', { class: 'input', rows: 5, placeholder: 'e.g. Explain before acting. Use MATLAB. Report values with uncertainty.' });
   const mem = h('input', { type: 'checkbox' });
   const sync = () => { if ((ctx.value.trim() || ins.value.trim()) && !mem.dataset.touched) mem.checked = true; };
+  const relTo = (base, f) => { const b = base.replace(/[\\/]+$/, ''); return f.toLowerCase().startsWith(b.toLowerCase()) ? f.slice(b.length + 1) : f; };
   ctx.addEventListener('input', sync); ins.addEventListener('input', sync); mem.addEventListener('change', () => { mem.dataset.touched = '1'; });
   const go = async () => {
     btn.disabled = true;
@@ -413,7 +417,8 @@ async function newConversation(folder, opts = {}) {
       const m = defaultModelFor(agent);
       const r = await api('/api/conversation/new', { agent, folder, title: title.value.trim() || undefined, modelKey: m?.key, effort: chooseEffort(m) });
       patchSettings({ defaultAgent: agent }, true);
-      await api('/api/conversation/memory-setup', { key: r.key, enable: mem.checked, title: title.value.trim(), context: ctx.value, instructions: ins.value });
+      const typed = ctx.value.trim() || ins.value.trim();
+      if (!has || (mem.checked && typed)) await api('/api/conversation/memory-setup', { key: r.key, enable: mem.checked, title: title.value.trim(), context: ctx.value, instructions: ins.value });
       dlg.close();
       await loadState(false);
       await openConversation(r.key, { quiet: true });
@@ -422,13 +427,20 @@ async function newConversation(folder, opts = {}) {
     } catch (e) { btn.disabled = false; fail(e); }
   };
   const btn = h('button', { class: 'btn primary', onclick: go }, t('create'));
+  // Context/instructions already in this folder (or its parents) are loaded; otherwise offer to create them.
+  let found = { files: [] };
+  try { found = await api('/api/memory/discover' + q({ folder })); } catch { /* folder not created yet */ }
+  const has = found.files.some((f) => f.current);
+  if (!has && settings().askMemory !== false) { mem.checked = true; mem.dataset.touched = ''; }
   const dlg = modal({ title: t('newChatTitle'), cls: 'mid', body: h('div', {},
       h('div', { class: 'help' }, folder),
       h('div', { class: 'field' }, h('span', {}, t('chooseAI')), cards),
       field(t('titleOptional'), title),
-      h('details', { class: 'mem-details', open: (settings().uiMode || 'simple') === 'pro' ? true : null }, h('summary', {}, t('memSetupTitle')),
-        h('p', { class: 'help' }, t('memSetupIntro')), field(t('contextBox'), ctx), field(t('instructionsBox'), ins),
-        h('label', { class: 'check' }, mem, h('span', {}, t('withMemory'))))),
+      found.files.length ? h('div', { class: 'banner info mem-found' }, h('span', { html: icon('book') }), h('div', {}, h('div', {}, t('memFoundFiles')), ...found.files.map((f) => h('div', { class: 'mono' }, '✓ ' + relTo(folder, f.file))))) : null,
+      has ? null : h('div', { class: 'banner warn mem-none' }, h('span', { html: icon('info') }), h('div', {}, found.files.length ? t('memNoneHere') : t('memNoneFound'))),
+      h('details', { class: 'mem-details', open: !has || (settings().uiMode || 'simple') === 'pro' ? true : null }, h('summary', {}, has ? t('memAddTo') : t('memSetupTitle')),
+        h('p', { class: 'help' }, has ? t('memAddHelp') : t('memSetupIntro')), field(t('contextBox'), ctx), field(t('instructionsBox'), ins),
+        h('label', { class: 'check' }, mem, h('span', {}, has ? t('memAppend') : t('withMemory'))))),
     foot: [h('button', { class: 'btn', onclick: () => dlg.close() }, t('cancel')), btn] });
   setTimeout(() => title.focus(), 40);
 }
@@ -507,9 +519,12 @@ function highlightText(text) {
 async function askMemoryForExisting(key) {
   const dont = h('input', { type: 'checkbox' });
   let answered = false;
-  const found = (S.conv?.key === key && S.conv.record.folderFiles) || [];
+  const rec = S.conv?.key === key ? S.conv.record : {};
+  const searched = rec.memoryFound?.searched || [];
   const m = modal({ title: t('memAskExisting'), body: h('div', {},
-    found.length ? h('div', { class: 'banner info' }, h('div', {}, h('div', {}, t('memFoundFiles')), ...found.map((f) => h('div', { class: 'mono' }, '✓ ' + f.split(/[\\/]/).pop())))) : null,
+    h('p', {}, t('memNoneHere')),
+    (rec.memoryFound?.files || []).length ? h('div', { class: 'banner info' }, h('div', {}, h('div', {}, t('memFromParents')), ...rec.memoryFound.files.map((f) => h('div', { class: 'mono' }, '✓ ' + f.file)))) : null,
+    searched.length ? h('details', {}, h('summary', { class: 'help', style: { cursor: 'pointer' } }, t('memSearched')), ...searched.map((d) => h('div', { class: 'mono help' }, d))) : null,
     h('p', {}, t('memAskText')), h('label', { class: 'check' }, dont, h('span', {}, t('dontAskAgain')))),
     foot: [
       h('button', { class: 'btn', onclick: async () => { answered = true; m.close(); if (dont.checked) patchSettings({ askMemory: false }, true); await api('/api/conversation/memory-setup', { key, enable: false }).catch(fail); if (S.conv?.key === key) S.conv.record.memoryState = 'declined'; } }, t('noThanks')),
@@ -531,7 +546,7 @@ function memorySetupDialog(key, { isNew }) {
       m.close();
       if (r.warnings?.length) toast(r.warnings.join('\n'));
       await loadState(false);
-      if (S.conv?.key === key) { await refreshMemoryInfo(); S.conv.record.memoryState = r.memoryState; renderMain(); }
+      if (S.conv?.key === key) { await refreshMemoryInfo(); renderMain(); if (r.files && Object.keys(r.files).length) toast(t('memCreated', { files: Object.values(r.files).map((f) => f.split(/[\\/]/).pop()).join(', ') })); }
       setTimeout(() => $.input?.focus(), 60);
     } catch (e) { done = false; fail(e); }
   };
@@ -605,6 +620,7 @@ async function openMemoryWorkspace() {
           h('div', { class: 'grow' }, h('div', {}, x.label, ' ', tag(x.changed)), h('div', { class: 'sub' }, `${x.file} · ${x.chars} chars · ${t('tokensApprox', { n: x.tokens })}${x.truncated ? ' · truncated' : ''}`), diff),
           h('button', { class: 'btn small', onclick: () => openMemoryEditor(x.file, x.label).then(() => {}) }, t('edit')));
       })),
+      p.found?.searched?.length ? h('details', {}, h('summary', { class: 'help', style: { cursor: 'pointer' } }, t('memSearched')), ...p.found.searched.map((d) => h('div', { class: 'mono help' }, d))) : null,
       p.warnings?.length ? h('div', { class: 'help' }, p.warnings.join('\n')) : null);
   };
   const mm = modal({ title: t('memoryWorkspace'), cls: 'mid', body, onClose: () => refreshMemoryInfo() });
@@ -623,11 +639,17 @@ function renderMain() {
     h('button', { 'data-tip': t('revealFolder'), onclick: () => api('/api/reveal', { path: r.cwd }).catch(fail) }, r.cwd || '—'),
     r.rolloutName ? [' ', h('button', { 'data-tip': t('rollout'), onclick: () => r.rollout && api('/api/reveal', { path: r.rollout }).catch(fail) }, `(${r.rolloutName})`)] : null);
   $.status = h('div', { class: 'status-chip-wrap' });
+  const mf = r.memoryFound?.files || [];
+  const short = (f) => (f.current ? '' : f.folder.split(/[\\/]/).filter(Boolean).pop() + '/') + f.file.split(/[\\/]/).pop();
+  const membar = h('div', { class: 'membar' }, h('span', { html: icon('book') }),
+    mf.length ? [h('span', { class: 'help' }, t('memLoaded')), ...mf.map((f) => h('button', { class: 'chip small', title: f.file, onclick: () => openMemoryEditor(f.file, short(f)) }, short(f)))]
+      : [h('span', { class: 'help' }, t('memNone')), h('button', { class: 'chip small', onclick: () => memorySetupDialog(S.conv.key, { isNew: false }) }, '+ ' + t('createFiles'))]);
   const head = h('div', { class: 'conv-head' }, showBtn,
-    h('div', { class: 'conv-title' }, titleEl, loc), $.status,
+    h('div', { class: 'conv-title' }, titleEl, loc, membar), $.status,
     ib('file', t('files'), () => toggleFiles(), { class: S.filesOpen ? 'active' : '' }),
     ib('search', t('searchAll'), () => openSearch()),
     ib('eye', t('memoryWorkspace'), () => openMemoryWorkspace()),
+    ib('history', t('checkpoints'), () => openCheckpoints()),
     r.agent !== 'codex' ? h('span', { class: 'badge', html: icon('bot') + esc(S.sum.agents[r.agent]?.label || r.agent) }) : null,
     ib('edit', t('rename'), () => inlineRename(titleEl)),
     ib('more', '⋯', (e) => convMenu(e.currentTarget, { ...convByKey().get(S.conv.key), key: S.conv.key, title: r.title, cwd: r.cwd })));
@@ -718,9 +740,49 @@ function renderProject(hidden) {
       h('button', { class: 'btn small', onclick: () => openAddons('skills', P.folder), html: icon('plus') + t('addSkill') }));
     const filesCard = h('section', { class: 'card hub-files' }, h('h3', { html: icon('folder') + esc(t('files')) }), renderFiles());
     const readme = h('section', { class: 'card hub-readme' }, h('h3', { html: icon('fileText') + 'README' }), d.readme ? h('div', { class: 'msg-agent', html: renderMarkdown(d.readme) }) : h('p', { class: 'help' }, t('noReadme')));
-    grid.append(convCard, filesCard, memCard, skillCard, gitCard, readme);
+    grid.append(convCard, specCard(P.folder, d), filesCard, memCard, skillCard, gitCard, readme);
   }
   $.main.replaceChildren(head, body);
+}
+
+// ------------------------------------------------------------------ Spec Kit card (spec → plan → tasks → implement)
+function specCard(folder, d) {
+  const sp = d.spec;
+  const card = h('section', { class: 'card hub-spec' }, h('h3', { html: icon('list') + esc(t('specDriven')) }));
+  if (!sp?.initialized) {
+    const agentSel = select([['codex', 'Codex'], ['claude', 'Claude Code']], settings().defaultAgent === 'claude' ? 'claude' : 'codex', () => {});
+    card.append(h('p', { class: 'help' }, t('specIntro')),
+      d.specifyInstalled
+        ? h('div', { class: 'toolbar' }, agentSel, h('button', { class: 'btn small primary', onclick: async () => { try { await api('/api/spec/init', { folder, agent: agentSel.value }); toast(t('specSettingUp')); } catch (e) { fail(e); } } }, t('specSetUp')))
+        : h('button', { class: 'btn small', onclick: () => openAddons('workflows', folder) }, t('specInstall')));
+    return card;
+  }
+  const run = (phase, feature) => async () => {
+    const needs = { specify: t('specWhat'), constitution: t('specPrinciples'), clarify: null, plan: t('specTech'), tasks: null, analyze: null, checklist: t('specChecklistOn'), implement: null, converge: null }[phase];
+    let args = '';
+    if (needs) { args = await ask({ title: `Spec Kit — ${phase}`, label: needs, value: '' }); if (args == null) return; }
+    const conv = S.conv?.record?.cwd === folder ? S.conv.key : (d.conversations[0]?.key || null);
+    try {
+      const r = await api('/api/spec/phase', conv ? { key: conv, phase, args } : { folder, phase, args });
+      if (conv) { if (S.conv?.key !== conv) await openConversation(conv, { quiet: true }); promptToAI(r.text); }
+      else newConversation(folder, { prompt: r.text });
+    } catch (e) { fail(e); }
+  };
+  card.append(
+    h('div', { class: 'help' }, `${t('specIntegration')}: ${sp.integration || '—'}${sp.constitution ? ` · ${t('specConstitution')}: ${sp.constitution.filled ? '✓' : t('specToWrite')}` : ''}`),
+    h('div', { class: 'chips' }, ...['constitution', 'specify', 'clarify', 'plan', 'tasks', 'analyze', 'implement'].map((p) => h('button', { class: 'chip small', onclick: run(p) }, `${PHASE_ICON[p]} ${t('ph_' + p)}`))),
+    sp.features.length ? h('div', { class: 'list' }, ...sp.features.slice().reverse().map((f) => h('div', { class: 'li' },
+      h('div', { class: 'grow' }, h('div', {}, f.name, sp.current && sp.current.endsWith(f.name) ? h('span', { class: 'badge', style: { marginLeft: '6px' } }, t('current')) : null),
+        h('div', { class: 'sub' }, ['spec', 'plan', 'tasks'].map((k) => `${f[k] ? '✓' : '·'} ${k}`).join('  ')),
+        f.progress?.total ? h('div', { class: 'progress', title: `${f.progress.done}/${f.progress.total}` }, h('div', { style: { width: `${Math.round((100 * f.progress.done) / f.progress.total)}%` } })) : null),
+      ...['spec', 'plan', 'tasks'].filter((k) => f[k]).map((k) => h('button', { class: 'btn small', onclick: () => openMemoryEditorOrPreview(f[k], `${f.name}/${k}.md`) }, k)),
+      f.next !== 'done' ? h('button', { class: 'btn small primary', onclick: run(f.next) }, `${t('next')}: ${t('ph_' + f.next)}`) : h('span', { class: 'badge ok' }, '✓'))))
+      : h('p', { class: 'help' }, t('specNoFeature')));
+  return card;
+}
+const PHASE_ICON = { constitution: '§', specify: '①', clarify: '?', plan: '②', tasks: '③', analyze: '⚖', implement: '④' };
+async function openMemoryEditorOrPreview(file, label) {
+  try { const r = await api('/api/project/file' + q({ folder: S.project?.folder || S.selFolder, file })); modal({ title: label, cls: 'wide', body: h('div', { class: 'msg-agent', html: renderMarkdown(r.text || '') }) }); } catch (e) { fail(e); }
 }
 
 function renderFiles() {
@@ -1005,7 +1067,7 @@ function composerBanner() {
   else if (S.banner) b = S.banner;
   if (!b) return null;
   return h('div', { class: `banner ${b.kind}` }, h('span', { html: icon(b.kind === 'info' ? 'info' : 'warn') }), h('span', { style: { whiteSpace: 'pre-wrap' } }, b.text),
-    h('span', { class: 'x', style: { display: 'flex', gap: '6px', alignItems: 'center' } }, ...(b.actions || []).map((a) => h('button', { class: 'btn small', onclick: a.run }, a.label)),
+    h('span', { class: 'x', style: { display: 'flex', gap: '6px', alignItems: 'center', flexWrap: 'wrap' } }, b.extra || null, ...(b.actions || []).map((a, i) => h('button', { class: `btn small${b.extra && i === 0 ? ' primary' : ''}`, onclick: a.run }, a.label)),
       b === S.banner ? ib('close', t('close'), () => { S.banner = null; renderMain(); }) : null));
 }
 
@@ -1032,7 +1094,7 @@ async function send() {
     // A fast turn can complete before this response arrives: only mark running if it has not finished yet.
     const finished = (S.turnsDone[key] || 0) > doneBefore;
     if (!finished) { S.conv.running = true; if (S.phase[key] === 'queued') S.phase[key] = 'running'; }
-    S.banner = r.warnings?.length ? { kind: 'warn', text: `${t('memoryWarn')}\n${r.warnings.join('\n')}` } : !r.contextSent && S.conv.memory?.conversation?.context ? null : null;
+    S.banner = r.warnings?.length ? { kind: 'warn', text: `${t('memoryWarn')}\n${r.warnings.join('\n')}` } : r.askMemoryUpdate ? memoryUpdateBanner(key, r.promptsSinceMemoryAsk) : null;
     renderMain();
   } catch (e) {
     // The draft is kept in every failure case; the banner offers the matching recovery.
@@ -1043,6 +1105,60 @@ async function send() {
     renderMain();
   } finally { S.sending = false; if ($.sendBtn) $.sendBtn.disabled = false; }
 }
+/** Every 5–10 prompts: update the context/instructions files automatically (by the AI) or manually (editor)? */
+function memoryUpdateBanner(key, n) {
+  const remember = h('input', { type: 'checkbox' });
+  const answer = async (choice) => {
+    S.banner = null; renderMain();
+    try {
+      const r = await api('/api/memory/update', { key, choice, remember: remember.checked });
+      if (remember.checked) { const st = settings(); st.memoryUpdateMode = choice === 'later' ? 'ask' : choice; }
+      if (choice === 'auto') toast(r.queued ? t('memUpdQueued') : t('memUpdating'));
+      if (choice === 'manual') openMemoryWorkspace();
+    } catch (e) { fail(e); }
+  };
+  return { kind: 'info', text: t('memUpdAsk', { n }), extra: h('label', { class: 'check', style: { margin: 0 } }, remember, h('span', {}, t('rememberChoice'))),
+    actions: [{ label: t('memUpdAuto'), run: () => answer('auto') }, { label: t('memUpdManual'), run: () => answer('manual') }, { label: t('later'), run: () => answer('later') }] };
+}
+/** Desktop notification when the window is in the background (opt-in, Configuration › General). */
+function notifyDesktop(key, text) {
+  if (!document.hidden || settings().notify === false || typeof Notification === 'undefined' || Notification.permission !== 'granted') return;
+  try {
+    const n = new Notification(convByKey().get(key)?.title || S.sum.brand.name, { body: text, tag: key, silent: false });
+    n.onclick = () => { window.focus(); if (key && S.conv?.key !== key) openConversation(key); n.close(); };
+  } catch { /* unsupported */ }
+}
+
+/** Checkpoints: files as they were before each message; preview what changed, restore. */
+async function openCheckpoints() {
+  if (!S.conv) return;
+  const key = S.conv.key;
+  const body = h('div', {}, h('p', { class: 'help' }, '…'));
+  const draw = async () => {
+    let r; try { r = await api('/api/checkpoints' + q({ key })); } catch (e) { body.replaceChildren(h('div', { class: 'errorbox' }, e.message)); return; }
+    if (!r.checkpoints.length) { body.replaceChildren(h('p', { class: 'help' }, r.enabled ? t('cpNone') : t('cpOff'))); return; }
+    body.replaceChildren(h('p', { class: 'help' }, t('cpIntro')), h('div', { class: 'list' }, ...r.checkpoints.map((c) => {
+      const detail = h('div', { class: 'sub' });
+      return h('div', { class: 'li', style: { alignItems: 'flex-start' } }, h('span', { html: icon(c.safety ? 'shield' : 'history') }),
+        h('div', { class: 'grow' }, h('div', {}, c.safety ? c.label : `${t('cpBefore')} “${c.label}”`), h('div', { class: 'sub' }, fmtTime(c.at)), detail),
+        h('button', { class: 'btn small', onclick: async () => {
+          detail.textContent = '…';
+          try { const p = await api('/api/checkpoints/preview', { key, id: c.id }); detail.textContent = !p.changed.length && !p.deleted.length && !p.created.length ? t('cpSame') : [p.changed.length ? `${t('cpChanged')}: ${p.changed.join(', ')}` : '', p.deleted.length ? `${t('cpDeleted')}: ${p.deleted.join(', ')}` : '', p.created.length ? `${t('cpCreated')}: ${p.created.join(', ')}` : ''].filter(Boolean).join('\n'); detail.style.whiteSpace = 'pre-wrap'; }
+          catch (e) { detail.textContent = e.message; }
+        } }, t('preview')),
+        h('button', { class: 'btn small primary', onclick: async () => {
+          let p; try { p = await api('/api/checkpoints/preview', { key, id: c.id }); } catch (e) { fail(e); return; }
+          const rm = h('input', { type: 'checkbox' });
+          const ok = await new Promise((resolve) => { let done = false; const m = modal({ title: t('cpRestore'), body: h('div', {}, h('p', {}, t('cpRestoreQ', { n: p.changed.length + p.deleted.length })), p.created.length ? h('label', { class: 'check' }, rm, h('span', {}, t('cpRemoveCreated', { files: p.created.join(', ') }))) : null, h('p', { class: 'help' }, t('cpSafety'))), foot: [h('button', { class: 'btn', onclick: () => m.close() }, t('cancel')), h('button', { class: 'btn primary', onclick: () => { done = true; m.close(); resolve(true); } }, t('cpRestore'))], onClose: () => { if (!done) resolve(false); } }); });
+          if (!ok) return;
+          try { const res = await api('/api/checkpoints/restore', { key, id: c.id, removeCreated: rm.checked }); toast(t('cpRestored', { n: res.restored.length + res.removed.length })); draw(); if (S.filesOpen) loadFiles(); if (settings().gitPanelOpen) loadGit(); } catch (e) { fail(e); }
+        } }, t('cpRestore')));
+    })));
+  };
+  modal({ title: t('checkpoints'), cls: 'mid', body });
+  draw();
+}
+
 async function stopTurn() { try { await api('/api/conversation/stop', { key: S.conv.key }); } catch (e) { fail(e); } }
 
 // ------------------------------------------------------------------ memory files
@@ -1063,6 +1179,7 @@ async function openMemoryEditor(file, title) {
   const m = modal({ title, cls: 'wide', body: ta, foot: [status, h('button', { class: 'btn', onclick: reload, html: icon('refresh') + t('reload') }), h('button', { class: 'btn', onclick: () => m.close() }, t('cancel')), h('button', { class: 'btn primary', onclick: save }, t('save'))] });
   ta.addEventListener('keydown', (e) => { if ((e.ctrlKey || e.metaKey) && e.key === 's') { e.preventDefault(); save(); } });
 }
+function fmtSize(n) { n = +n || 0; return n < 1024 ? `${n} B` : n < 1048576 ? `${(n / 1024).toFixed(n < 10240 ? 1 : 0)} KB` : `${(n / 1048576).toFixed(1)} MB`; }
 async function refreshMemoryInfo() { try { const d = await api('/api/conversation' + q({ key: S.conv.key })); S.conv.memory = d.memory; S.conv.record = d.record; } catch { /* */ } }
 
 async function openLinkDialog() {
@@ -1103,6 +1220,13 @@ async function gitOp(op, args = {}) {
   S.git.busy = false;
   await loadGit();
   if (S.conv) { const gb = document.querySelector('.gitbar .lbl'); if (gb && S.git.st?.branch) gb.innerHTML = icon('branch') + esc(S.git.st.branch); }
+}
+/** Bitbucket Cloud remote + connected account → create the pull request through the API; otherwise open the website. */
+async function gitPRSmart(st) {
+  const isBB = (st?.remotes || []).some((r) => /bitbucket\.org[:/]/.test(r.url || ''));
+  const info = isBB ? (S.connInfo || await loadConnections()) : null;
+  if (isBB && info?.bitbucket?.connected) { const tg = gitTarget(); if (tg) return prFromFolder(tg.folder || S.conv?.record?.cwd || S.selFolder); }
+  return gitPR();
 }
 async function gitPR() {
   const tgt = gitTarget(); if (!tgt) return;
@@ -1173,7 +1297,9 @@ function renderGit() {
     const a = (iconName, label, fn) => h('button', { class: 'btn', onclick: fn, disabled: S.git.busy, html: icon(iconName) + `<span>${esc(label)}</span>` });
     body.append(h('div', { class: 'gp-section' }, t('remote')), h('div', { class: 'gp-grid' },
       a('fetch', t('fetch'), () => gitOp('fetch')), a('pull', t('pull'), () => gitOp('pull')), a('rebase', t('pullRebase'), () => gitOp('pull', { rebase: true })),
-      a('push', t('push'), () => gitOp('push')), a('pr', t('pr'), () => gitPR()), a('plus', t('addRemote'), async () => { const u = await ask({ title: t('addRemote'), label: 'URL', help: 'git@bitbucket.org:team/repo.git' }); if (u) gitOp('remote-add', { name: st.remotes?.length ? 'upstream' : 'origin', url: u }); })));
+      a('push', t('push'), () => gitOp('push')), a('pr', t('pr'), () => gitPRSmart(st)), a('plus', t('addRemote'), async () => { const u = await ask({ title: t('addRemote'), label: 'URL', help: 'git@bitbucket.org:team/repo.git' }); if (u) gitOp('remote-add', { name: st.remotes?.length ? 'upstream' : 'origin', url: u }); }),
+      a('upload', t('publishDots'), async () => { const tg = gitTarget(); if (!tg) return; const info = await loadConnections(); publishFlow(tg.folder || S.conv?.record?.cwd || S.selFolder, info.git); }),
+      a('key', t('gitAccounts'), () => openConnections('git'))));
     body.append(h('div', { class: 'gp-section' }, t('branch')), h('div', { class: 'gp-grid' },
       a('branch', t('newBranch'), gitBranchCreate), a('chevron', t('switchBranch'), () => gitPickBranch('switch')), a('merge', t('merge'), () => gitPickBranch('merge')),
       a('rebase', t('rebase'), () => gitPickBranch('rebase')), a('trash', t('deleteBranch'), () => gitPickBranch('branch-delete')), a('tag', t('tag'), async () => { const v = await ask({ title: t('tag'), label: t('name'), value: 'v' }); if (v) gitOp('tag', { tag: v }); })));
@@ -1219,7 +1345,10 @@ function renderFilesPanel() {
     ...section(t('filesChanged'), F.changed, (f) => row(f, `${f.kinds.join(', ')} · ${f.edits}× ${f.exists === false ? '· ' + t('fileMissing') : ''}`, h('span', { class: 'badge' }, f.kinds.includes('add') ? 'A' : f.kinds.includes('delete') ? 'D' : 'M'))),
     ...section(t('filesRead'), F.read, (f) => row(f, `${f.times}× ${f.exists === false ? '· ' + t('fileMissing') : ''}`)),
     ...section(t('attachments'), F.attachments, (f) => row({ ...f, label: f.name }, fmtTime(f.at))),
-    ...section(t('memoryFiles'), F.memory, (f) => row(f, fmtTime(f.mtime))),
+    ...section(t('memoryFiles'), F.memory, (f) => row(f, `${f.loaded ? t('loadedEachMsg') + ' · ' : ''}${fmtTime(f.mtime)}`, f.loaded ? h('span', { class: 'badge ok' }, '✓') : null)),
+    ...section(t('folderFiles'), F.folder || [], (f) => f.dir
+      ? h('div', { class: 'li fdir', style: { paddingLeft: `${8 + f.depth * 14}px` }, html: icon('folder') + `<span>${esc(f.rel.split(/[\\/]/).pop())}</span>` })
+      : h('button', { class: 'li hub-link', title: f.path, style: { paddingLeft: `${8 + f.depth * 14}px` }, onclick: () => previewConvFile(f) }, h('span', { html: icon('file') }), h('div', { class: 'grow fp-name' }, f.rel.split(/[\\/]/).pop()), f.memory ? h('span', { class: 'badge ok', 'data-tip': t('loadedEachMsg') }, '✓') : h('span', { class: 'sub' }, fmtSize(f.size)))),
     h('button', { class: 'btn', onclick: () => openProject(cwd), html: icon('folder') + t('browseFolder') }));
   $.filesp.replaceChildren(h('div', { class: 'gp-head' }, h('h3', { html: icon('file') + esc(t('files')) }), ib('refresh', t('refresh'), loadFiles), ib('close', t('close'), toggleFiles)), body);
 }
@@ -1233,11 +1362,337 @@ async function previewConvFile(f) {
   if (f.lastDiff) {
     tabs.append(h('button', { class: 'btn small', onclick: () => area.replaceChildren(content) }, t('preview')), h('button', { class: 'btn small', onclick: () => area.replaceChildren(h('pre', { class: 'codeblock', html: diffHtml(f.lastDiff) })) }, t('changesHere')));
   }
-  const isMem = /(CONTEXT|INSTRUCTIONS)\.md$/.test(f.path);
+  const isMem = /(CONTEXT|INSTRUCTIONS)\.md$/.test(f.path) || f.memory || f.loaded;
   modal({ title: f.label || f.path.split(/[\\/]/).pop(), cls: 'wide', body: h('div', {}, h('div', { class: 'help' }, f.path), tabs, area),
     foot: [isMem ? h('button', { class: 'btn', onclick: () => openMemoryEditor(f.path, f.label || f.path) }, t('edit')) : null,
       S.sum.tools.vscode.enabled ? h('button', { class: 'btn', onclick: () => api('/api/tools/vscode', { key: S.conv.key, file: f.path }).catch(fail) }, 'VS Code') : null,
       h('button', { class: 'btn', onclick: () => api('/api/reveal', { path: f.path }).catch(fail) }, t('openInExplorer'))].filter(Boolean) });
+}
+
+// ------------------------------------------------------------------ Connections (Jira, Bitbucket, Git, MATLAB)
+async function loadConnections() { try { S.connInfo = await api('/api/connections'); } catch { S.connInfo = null; } return S.connInfo; }
+const linkOut = (href, label) => h('a', { class: 'help', href, target: '_blank', rel: 'noopener noreferrer' }, `${label} ↗`);
+const statusPill = (ok, text) => h('div', { class: `mcp-status ${ok ? 'ok' : 'warn'}` }, h('span', { class: `dot ${ok ? 'ready' : 'starting'}` }), h('span', {}, text));
+const busy = async (btn, out, fn) => { btn.disabled = true; out.textContent = '…'; out.className = 'help'; try { await fn(); } catch (e) { out.textContent = e.message; out.className = 'errorbox'; } btn.disabled = false; };
+
+async function openConnections(tab = 'jira') {
+  const nav = h('nav'), section = h('section');
+  const tabs = [['jira', 'Jira'], ['bitbucket', 'Bitbucket'], ['git', 'Git'], ['matlab', 'MATLAB']];
+  const show = async (id) => {
+    tab = id;
+    nav.querySelectorAll('button').forEach((b) => b.classList.toggle('on', b.dataset.tab === id));
+    section.replaceChildren(h('div', { class: 'help' }, '…'));
+    const info = await loadConnections();
+    if (!info) { section.replaceChildren(h('div', { class: 'errorbox' }, t('connLost'))); return; }
+    section.replaceChildren(...await CONN_TABS[id](info, () => show(id), m));
+  };
+  for (const [id, label] of tabs) nav.append(h('button', { 'data-tab': id, onclick: () => show(id), html: (await toolIcon(id)) + `<span>${esc(label)}</span>` }));
+  const m = modal({ title: t('connections'), cls: 'wide conn', body: h('div', { class: 'settings' }, nav, section) });
+  show(tab);
+}
+
+const CONN_TABS = {
+  async jira(info, redraw, dlg) {
+    const J = info.jira;
+    const site = h('input', { class: 'input', value: J.site || '', placeholder: 'https://yourcompany.atlassian.net', spellcheck: 'false' });
+    const email = h('input', { class: 'input', value: J.email || '', placeholder: 'you@company.com', spellcheck: 'false' });
+    const token = h('input', { class: 'input', type: 'password', autocomplete: 'new-password', placeholder: J.connected ? `•••••• (${t('keySaved')})` : '' });
+    const mcp = h('input', { type: 'checkbox', checked: true });
+    const out = h('div', { class: 'help' });
+    const connect = h('button', { class: 'btn primary', onclick: () => busy(connect, out, async () => {
+      const r = await api('/api/connections/jira', { site: site.value.trim(), email: email.value.trim(), token: token.value.trim() || undefined, mcp: mcp.checked });
+      token.value = ''; toast(t('connectedAs', { name: r.user })); redraw(); renderTop();
+    }) }, J.connected ? t('reconnect') : t('connect'));
+    return [h('h3', {}, 'Jira'),
+      J.connected ? statusPill(true, t('connectedAs', { name: `${J.user || J.email} · ${J.site.replace(/^https?:\/\//, '')}` })) : h('div', { class: 'banner info' }, h('span', { html: icon('info') }), h('span', {}, t('jiraConnectIntro'))),
+      J.connected ? h('div', { class: 'inline' }, h('button', { class: 'btn primary', onclick: () => { dlg.close(); openJiraPanel(); }, html: icon('list') + t('openJira') }), h('a', { class: 'btn', href: J.site, target: '_blank', rel: 'noopener noreferrer' }, `${J.site.replace(/^https?:\/\//, '')} ↗`)) : null,
+      J.mcp ? mcpStatusLine(J.mcp.name, `Jira ↔ ${t('aiAgents')}`) : null,
+      h('details', { open: !J.connected }, h('summary', { class: 'gp-section', style: { cursor: 'pointer' } }, J.connected ? t('changeConnection') : t('connectJira')),
+        field(t('jiraSite'), site), field(t('email'), email), field(t('atlTokenLabel'), token),
+        h('div', { class: 'inline' }, linkOut('https://id.atlassian.com/manage-profile/security/api-tokens', t('createToken'))),
+        h('label', { class: 'check' }, mcp, h('span', {}, t('alsoMcp'))),
+        h('div', { class: 'inline' }, connect), out,
+        h('details', {}, h('summary', { class: 'help', style: { cursor: 'pointer' } }, t('jiraAiOnly')),
+          h('p', { class: 'help' }, t('jiraAiOnlyHelp')),
+          h('button', { class: 'btn small', onclick: (e) => busy(e.currentTarget, out, async () => { const r = await api('/api/atlassian/connect', { purpose: 'jira', mode: 'oauth' }); out.textContent = r.notes.join(' · '); }) }, t('atlOauth'))))];
+  },
+
+  async bitbucket(info, redraw, dlg) {
+    const B = info.bitbucket;
+    const email = h('input', { class: 'input', value: B.email || '', placeholder: 'you@company.com', spellcheck: 'false' });
+    const token = h('input', { class: 'input', type: 'password', autocomplete: 'new-password', placeholder: B.connected ? `•••••• (${t('keySaved')})` : '' });
+    const mcp = h('input', { type: 'checkbox', checked: true }), forGit = h('input', { type: 'checkbox', checked: true });
+    const out = h('div', { class: 'help' });
+    const connect = h('button', { class: 'btn primary', onclick: () => busy(connect, out, async () => {
+      const r = await api('/api/connections/bitbucket', { email: email.value.trim(), token: token.value.trim(), mcp: mcp.checked, useForGit: forGit.checked });
+      token.value = ''; toast(t('connectedAs', { name: r.user })); redraw(); renderTop();
+    }) }, B.connected ? t('reconnect') : t('connect'));
+    return [h('h3', {}, 'Bitbucket Cloud'),
+      B.connected ? statusPill(true, t('connectedAs', { name: `${B.user || B.email}${B.workspace ? ' · ' + B.workspace : ''}` })) : h('div', { class: 'banner info' }, h('span', { html: icon('info') }), h('span', {}, t('bbConnectIntro'))),
+      B.connected ? h('div', { class: 'inline' }, h('button', { class: 'btn primary', onclick: () => { dlg.close(); openBitbucketPanel(); }, html: icon('pr') + t('openBitbucket') })) : null,
+      B.mcp ? mcpStatusLine(B.mcp.name, `Bitbucket ↔ ${t('aiAgents')}`) : null,
+      h('details', { open: !B.connected }, h('summary', { class: 'gp-section', style: { cursor: 'pointer' } }, B.connected ? t('changeConnection') : t('connectBitbucket')),
+        field(t('email'), email), field(t('atlTokenLabel'), token),
+        h('p', { class: 'help' }, t('bbTokenHelp')), linkOut('https://id.atlassian.com/manage-profile/security/api-tokens', t('createToken')),
+        h('label', { class: 'check' }, mcp, h('span', {}, t('alsoMcp'))),
+        h('label', { class: 'check' }, forGit, h('span', {}, t('alsoGit'))),
+        h('div', { class: 'inline' }, connect), out),
+      h('p', { class: 'help' }, t('bbServerNoMcp'))];
+  },
+
+  async git(info, redraw) {
+    const G = info.git;
+    if (!G.available) return [h('h3', {}, 'Git'), h('div', { class: 'errorbox' }, t('gitMissing')), linkOut('https://git-scm.com/downloads', 'git-scm.com')];
+    // identity
+    const name = h('input', { class: 'input', value: G.identity.name, placeholder: 'Jack Salameh' });
+    const mail = h('input', { class: 'input', value: G.identity.email, placeholder: 'you@example.com' });
+    const idOut = h('div', { class: 'help' });
+    const idBtn = h('button', { class: 'btn small', onclick: () => busy(idBtn, idOut, async () => { await api('/api/git/identity', { name: name.value, email: mail.value }); idOut.textContent = '✓'; }) }, t('save'));
+    // accounts
+    const accList = h('div', { class: 'list' }, ...(G.accounts.length ? G.accounts.map((a) => h('div', { class: 'li' },
+      h('span', { html: icon(a.auth === 'ssh' ? 'key' : 'shield') }),
+      h('div', { class: 'grow' }, h('div', {}, `${a.label} — ${a.name || a.username || ''}`), h('div', { class: 'sub' }, `${a.host} · ${a.auth === 'token' ? t('httpsToken') : a.auth === 'ssh' ? 'SSH' : t('systemCred')}${a.verified ? ' · ✓' : ''}`)),
+      ['github', 'gitlab', 'bitbucket'].includes(a.provider) && a.auth === 'token' ? h('button', { class: 'btn small', onclick: () => openRepoPicker(a) }, t('myRepos')) : null,
+      h('button', { class: 'btn small', onclick: async () => { if (await confirmBox({ title: t('confirm'), text: t('removeAccountQ', { name: `${a.label} ${a.host}` }), danger: true })) { await api('/api/git/account/remove', { id: a.id }).catch(fail); redraw(); } } }, t('remove'))))
+      : [h('div', { class: 'li help' }, t('noGitAccounts'))]));
+    // add account
+    const prov = select(Object.entries(G.hosts).map(([k, v]) => [k, v.label]), 'github', () => sync());
+    const host = h('input', { class: 'input', placeholder: 'git.mycompany.com', spellcheck: 'false' });
+    const apiBase = h('input', { class: 'input', placeholder: 'https://git.mycompany.com/api/v4', spellcheck: 'false' });
+    const user = h('input', { class: 'input', spellcheck: 'false' });
+    const email = h('input', { class: 'input', placeholder: 'you@company.com', spellcheck: 'false' });
+    const token = h('input', { class: 'input', type: 'password', autocomplete: 'new-password' });
+    const method = select([['token', t('httpsToken')], ['ssh', t('sshKey')], ['system', t('systemCred')]], 'token', () => sync());
+    const tokLink = h('div');
+    const sshBox = h('div');
+    const fHost = field(t('server'), host), fApi = field(t('apiUrlOpt'), apiBase), fUser = field(t('userName'), user), fMail = field(t('email'), email), fTok = field(t('accessToken'), token);
+    const sync = () => {
+      const p = G.hosts[prov.value];
+      fHost.classList.toggle('hidden', !!p.host); fApi.classList.toggle('hidden', prov.value !== 'gitlab' && prov.value !== 'other');
+      fUser.classList.toggle('hidden', !(prov.value === 'other' || prov.value === 'azure') || method.value !== 'token');
+      fMail.classList.toggle('hidden', prov.value !== 'bitbucket' || method.value !== 'token');
+      fTok.classList.toggle('hidden', method.value !== 'token');
+      tokLink.replaceChildren(method.value === 'token' && p.tokenUrl ? linkOut(p.tokenUrl, t('createToken')) : document.createTextNode(''));
+      sshBox.replaceChildren(...(method.value === 'ssh' ? sshPanel(G, p, host) : []));
+    };
+    sync();
+    const addOut = h('div', { class: 'help' });
+    const addBtn = h('button', { class: 'btn primary', onclick: () => busy(addBtn, addOut, async () => {
+      const r = await api('/api/git/account', { provider: prov.value, host: host.value.trim() || undefined, apiBase: apiBase.value.trim() || undefined, username: user.value.trim() || undefined, email: email.value.trim() || undefined, token: token.value.trim() || undefined, auth: method.value });
+      token.value = ''; toast(`${t('connected')}: ${r.account.name || r.account.host}`); redraw();
+    }) }, t('connect'));
+    // clone + publish
+    const url = h('input', { class: 'input', placeholder: 'https://github.com/owner/repo.git  ·  git@bitbucket.org:ws/repo.git', spellcheck: 'false' });
+    const cloneOut = h('div', { class: 'help' });
+    const cloneBtn = h('button', { class: 'btn', onclick: () => busy(cloneBtn, cloneOut, async () => { await cloneFlow(url.value.trim()); cloneOut.textContent = ''; }) }, t('cloneDots'));
+    const testBtn = h('button', { class: 'btn', onclick: () => busy(testBtn, cloneOut, async () => { const r = await api('/api/git/remote/test', { url: url.value.trim() }); cloneOut.textContent = `${r.ok ? '✓' : '✕'} ${r.output}${r.hint ? '\n' + r.hint : ''}`; }) }, t('test'));
+    const folder = S.conv?.record?.cwd || S.selFolder;
+    return [h('h3', {}, 'Git'),
+      h('div', { class: 'gp-section' }, t('gitIdentity')), h('p', { class: 'help' }, t('gitIdentityHelp')),
+      h('div', { class: 'inline' }, field(t('name'), name), field(t('email'), mail), idBtn), idOut,
+      h('div', { class: 'gp-section' }, t('gitAccounts')), accList,
+      h('details', { open: !G.accounts.length }, h('summary', { class: 'help', style: { cursor: 'pointer' } }, '+ ' + t('addGitAccount')),
+        field(t('host'), prov), fHost, fApi, field(t('signInWith'), method), fUser, fMail, fTok, tokLink, sshBox, h('div', { class: 'inline' }, addBtn), addOut),
+      h('div', { class: 'gp-section' }, t('cloneRepo')), url, h('div', { class: 'inline' }, cloneBtn, testBtn), cloneOut,
+      folder ? h('div', {}, h('div', { class: 'gp-section' }, t('publishFolder')), h('p', { class: 'help' }, folder), h('button', { class: 'btn', onclick: () => publishFlow(folder, G) }, t('publishDots'))) : null];
+  },
+
+  async matlab(info) {
+    const T = S.sum.tools;
+    if (!T.matlab.enabled) return [h('h3', {}, 'MATLAB'), h('p', { class: 'help' }, t('matlabOff')), h('button', { class: 'btn', onclick: () => openSettings('tools', 'matlab') }, t('configuration'))];
+    return [h('h3', {}, 'MATLAB'), matlabMcpBox(T)];
+  },
+};
+
+function sshPanel(G, p, hostInput) {
+  const out = h('div', { class: 'help' });
+  const keyBox = h('pre', { class: 'codeblock', style: { whiteSpace: 'pre-wrap', wordBreak: 'break-all' } }, G.ssh?.key || '—');
+  const gen = h('button', { class: 'btn small', onclick: () => busy(gen, out, async () => { const r = await api('/api/git/ssh-key', { create: true, email: G.identity.email }); keyBox.textContent = r.key; out.textContent = r.file; }) }, G.ssh ? t('showKey') : t('createKey'));
+  const copy = h('button', { class: 'btn small', onclick: () => navigator.clipboard?.writeText(keyBox.textContent).then(() => toast(t('copied'))) }, t('copy'));
+  const test = h('button', { class: 'btn small', onclick: () => busy(test, out, async () => { const r = await api('/api/git/ssh-test', { host: p.host || hostInput.value.trim() }); out.textContent = `${r.ok ? '✓' : '✕'} ${r.output}`; }) }, t('test'));
+  return [h('p', { class: 'help' }, t('sshHelp')), keyBox, h('div', { class: 'inline' }, gen, copy, p.sshUrl ? linkOut(p.sshUrl, t('addKeyOnSite')) : null, test), out];
+}
+
+async function openRepoPicker(acc) {
+  const qi = h('input', { class: 'input', placeholder: t('search') });
+  const list = h('div', { class: 'list', style: { maxHeight: '55vh', overflow: 'auto' } }, h('div', { class: 'li help' }, '…'));
+  const load = async () => {
+    try {
+      const r = await api('/api/git/account/repos' + q({ id: acc.id, q: qi.value.trim() }));
+      list.replaceChildren(...(r.repos.length ? r.repos.map((x) => h('div', { class: 'li' }, h('span', { html: icon(x.private ? 'shield' : 'globe') }),
+        h('div', { class: 'grow' }, h('div', {}, x.name), h('div', { class: 'sub' }, `${x.defaultBranch || ''} · ${fmtTime(Date.parse(x.updated))}`)),
+        h('button', { class: 'btn small primary', onclick: () => { m.close(); cloneFlow(x.https || x.ssh); } }, t('cloneDots')),
+        x.web ? h('a', { class: 'btn small', href: x.web, target: '_blank', rel: 'noopener noreferrer' }, '↗') : null)) : [h('div', { class: 'li help' }, t('noResults'))]));
+    } catch (e) { list.replaceChildren(h('div', { class: 'errorbox' }, e.message)); }
+  };
+  let timer; qi.addEventListener('input', () => { clearTimeout(timer); timer = setTimeout(load, 300); });
+  const m = modal({ title: `${acc.label} — ${t('myRepos')}`, cls: 'mid', body: h('div', {}, qi, list) });
+  load();
+}
+
+async function cloneFlow(url) {
+  if (!url) throw new Error(t('pasteRepoUrl'));
+  const parent = await pickFolder();
+  if (!parent) return;
+  const name = await ask({ title: t('cloneRepo'), label: t('folderName'), value: url.split(/[/:]/).pop().replace(/\.git$/, '') });
+  if (!name) return;
+  toast(t('cloning'));
+  const r = await api('/api/git/clone', { url, parent, name });
+  toast(`✓ ${r.folder}`);
+  await loadState(false);
+  openProject(r.folder);
+}
+
+async function publishFlow(folder, G) {
+  const accs = G.accounts.filter((a) => ['github', 'gitlab', 'bitbucket'].includes(a.provider) && a.auth === 'token');
+  const mode = select([['url', t('pasteRepoUrl')], ...accs.map((a) => [a.id, t('createOn', { site: `${a.label} (${a.name || a.host})` })])], accs[0]?.id || 'url', () => sync());
+  const url = h('input', { class: 'input', placeholder: 'https://…/repo.git', spellcheck: 'false' });
+  const name = h('input', { class: 'input', value: folder.split(/[\\/]/).filter(Boolean).pop().replace(/\s+/g, '-') });
+  const priv = h('input', { type: 'checkbox', checked: true });
+  const fUrl = field(t('repoUrl'), url), fName = field(t('repoName'), name), fPriv = h('label', { class: 'check' }, priv, h('span', {}, t('privateRepo')));
+  const sync = () => { const u = mode.value === 'url'; fUrl.classList.toggle('hidden', !u); fName.classList.toggle('hidden', u); fPriv.classList.toggle('hidden', u); };
+  sync();
+  const out = h('div', { class: 'help' });
+  const go = h('button', { class: 'btn primary', onclick: () => busy(go, out, async () => {
+    const r = await api('/api/git/publish', mode.value === 'url' ? { folder, url: url.value.trim() } : { folder, accountId: mode.value, name: name.value.trim(), isPrivate: priv.checked });
+    out.textContent = `${r.pushed ? '✓ ' + t('pushed') : r.note || r.output || ''} — ${r.remote}${r.hint ? '\n' + r.hint : ''}`;
+    if (S.git) S.git.st = null;
+  }) }, t('publish'));
+  modal({ title: t('publishFolder'), cls: 'mid', body: h('div', {}, h('p', { class: 'help' }, folder), h('p', { class: 'help' }, t('publishHelp')), field(t('destination'), mode), fUrl, fName, fPriv, out), foot: [go] });
+}
+
+/** Puts a prompt in the composer of the open conversation, or starts a new conversation with it. */
+function promptToAI(text, folder) {
+  if (S.conv && $.input) { $.input.value = `${$.input.value ? $.input.value + '\n\n' : ''}${text}`; $.input.dispatchEvent(new Event('input')); $.input.focus(); toast(t('promptReady')); return; }
+  newConversation(folder || S.selFolder, { prompt: text });
+}
+
+// ------------------------------------------------------------------ Jira panel
+async function openJiraPanel() {
+  const info = S.connInfo || await loadConnections();
+  if (!info?.jira?.connected) return openConnections('jira');
+  const preset = select([['mine', t('jqlMine')], ['reported', t('jqlReported')], ['watching', t('jqlWatching')], ['recent', t('jqlRecent')]], 'mine', () => load());
+  const project = h('select', { class: 'input' }, h('option', { value: '' }, t('allProjects')));
+  project.onchange = () => load();
+  const qi = h('input', { class: 'input', placeholder: t('jiraSearchPh') });
+  const list = h('div', { class: 'list jira-list' }), detail = h('div', { class: 'jira-detail' }, h('p', { class: 'help' }, t('pickIssue')));
+  const jqlLine = h('div', { class: 'sub mono' });
+  let timer;
+  qi.addEventListener('input', () => { clearTimeout(timer); timer = setTimeout(load, 350); });
+  async function load() {
+    list.replaceChildren(h('div', { class: 'li help' }, '…'));
+    try {
+      const r = await api('/api/jira/search', { preset: preset.value, project: project.value || undefined, text: qi.value.trim() || undefined });
+      jqlLine.textContent = r.jql;
+      list.replaceChildren(...(r.issues.length ? r.issues.map((i) => h('button', { class: 'li hub-link', onclick: () => openIssue(i.key) },
+        h('span', { class: `badge st-${i.statusCategory}` }, i.status), h('div', { class: 'grow' }, h('div', {}, `${i.key} · ${i.summary}`), h('div', { class: 'sub' }, `${i.type} · ${i.priority} · ${i.assignee || t('unassigned')} · ${fmtTime(Date.parse(i.updated))}`))))
+        : [h('div', { class: 'li help' }, t('noResults'))]));
+    } catch (e) { list.replaceChildren(h('div', { class: 'errorbox' }, e.message)); }
+  }
+  async function openIssue(key) {
+    detail.replaceChildren(h('div', { class: 'help' }, '…'));
+    let i; try { i = await api('/api/jira/issue' + q({ key })); } catch (e) { detail.replaceChildren(h('div', { class: 'errorbox' }, e.message)); return; }
+    const out = h('div', { class: 'help' });
+    const tr = select([['', t('changeStatus')], ...i.transitions.map((x) => [x.id, `${x.name}${x.to && x.to !== x.name ? ' → ' + x.to : ''}`])], '', () => {});
+    const com = h('textarea', { class: 'input', rows: 3, placeholder: t('addComment') });
+    const act = (body, msg) => (e) => busy(e.currentTarget, out, async () => { await api('/api/jira/act', { key, ...body }); toast(msg); openIssue(key); load(); });
+    const aiText = `Jira issue ${i.key} — ${i.summary}\nStatus: ${i.status} · Type: ${i.type} · Priority: ${i.priority}\n\nDescription:\n${i.description || '(none)'}\n\n${i.comments.length ? 'Latest comments:\n' + i.comments.slice(-5).map((c) => `- ${c.author}: ${c.text}`).join('\n') + '\n\n' : ''}Help me work on this issue in this folder: propose a plan, then carry it out step by step.`;
+    detail.replaceChildren(
+      h('h3', {}, `${i.key} · ${i.summary}`),
+      h('div', { class: 'chips' }, ...[i.status, i.type, i.priority, i.assignee || t('unassigned'), ...i.labels].filter(Boolean).map((v) => h('span', { class: 'chip static small' }, v))),
+      h('div', { class: 'inline' },
+        h('button', { class: 'btn primary small', onclick: () => { m.close(); promptToAI(aiText); }, html: icon('spark') + t('workWithAI') }),
+        h('button', { class: 'btn small', onclick: act({ action: 'assign' }, t('assignedToYou')) }, t('assignToMe')),
+        h('a', { class: 'btn small', href: i.url, target: '_blank', rel: 'noopener noreferrer' }, `${t('openInJira')} ↗`)),
+      h('div', { class: 'gp-section' }, t('description')), h('div', { class: 'jira-text' }, i.description || '—'),
+      i.subtasks.length ? h('div', {}, h('div', { class: 'gp-section' }, t('subtasks')), ...i.subtasks.map((s) => h('button', { class: 'li hub-link', onclick: () => openIssue(s.key) }, `${s.key} · ${s.summary} (${s.status})`))) : null,
+      h('div', { class: 'gp-section' }, `${t('comments')} (${i.comments.length})`),
+      ...i.comments.map((c) => h('div', { class: 'jira-comment' }, h('div', { class: 'sub' }, `${c.author} · ${fmtTime(Date.parse(c.created))}`), h('div', { class: 'jira-text' }, c.text))),
+      com, h('div', { class: 'toolbar' }, h('button', { class: 'btn small', onclick: (e) => { if (com.value.trim()) act({ action: 'comment', text: com.value }, t('commentAdded'))(e); } }, t('addComment')),
+        h('span', { class: 'grow' }), tr, h('button', { class: 'btn small', onclick: (e) => { if (tr.value) act({ action: 'transition', transition: tr.value }, t('statusChanged'))(e); } }, t('apply'))), out);
+  }
+  const createBtn = h('button', { class: 'btn small', html: icon('plus') + t('newIssue'), onclick: () => createIssueDialog(project.value, (k) => { load(); openIssue(k); }) });
+  const m = modal({ title: 'Jira', cls: 'wide jira-panel', body: h('div', {},
+    h('div', { class: 'toolbar' }, preset, project, qi, createBtn), jqlLine,
+    h('div', { class: 'split' }, list, detail)) });
+  load();
+  api('/api/jira/projects').then((r) => project.append(...r.projects.map((p) => h('option', { value: p.key }, `${p.key} — ${p.name}`)))).catch(() => {});
+}
+
+async function createIssueDialog(proj, done) {
+  let projects = []; try { projects = (await api('/api/jira/projects')).projects; } catch (e) { fail(e); return; }
+  const p = select(projects.map((x) => [x.key, `${x.key} — ${x.name}`]), proj || projects[0]?.key, () => {});
+  const type = select([['Task', 'Task'], ['Bug', 'Bug'], ['Story', 'Story']], 'Task', () => {});
+  const sum = h('input', { class: 'input' }), desc = h('textarea', { class: 'input', rows: 5 });
+  const out = h('div', { class: 'help' });
+  const go = h('button', { class: 'btn primary', onclick: () => busy(go, out, async () => { const r = await api('/api/jira/create', { project: p.value, type: type.value, summary: sum.value, description: desc.value }); m.close(); toast(`✓ ${r.key}`); done?.(r.key); }) }, t('create'));
+  const m = modal({ title: t('newIssue'), cls: 'mid', body: h('div', {}, field(t('project'), p), field(t('type'), type), field(t('summary'), sum), field(t('description'), desc), out), foot: [go] });
+}
+
+// ------------------------------------------------------------------ Bitbucket panel
+async function openBitbucketPanel() {
+  const info = S.connInfo || await loadConnections();
+  if (!info?.bitbucket?.connected) return openConnections('bitbucket');
+  const ws = h('select', { class: 'input' });
+  const qi = h('input', { class: 'input', placeholder: t('searchRepos') });
+  const repos = h('div', { class: 'list jira-list' }), detail = h('div', { class: 'jira-detail' }, h('p', { class: 'help' }, t('pickRepo')));
+  let timer; qi.addEventListener('input', () => { clearTimeout(timer); timer = setTimeout(loadRepos, 350); });
+  ws.onchange = () => loadRepos();
+  async function loadRepos() {
+    repos.replaceChildren(h('div', { class: 'li help' }, '…'));
+    try {
+      const r = await api('/api/bitbucket/repos' + q({ workspace: ws.value, q: qi.value.trim() }));
+      repos.replaceChildren(...(r.repos.length ? r.repos.map((x) => h('button', { class: 'li hub-link', onclick: () => openRepo(x) }, h('span', { html: icon(x.private ? 'shield' : 'globe') }),
+        h('div', { class: 'grow' }, h('div', {}, x.name), h('div', { class: 'sub' }, `${x.mainBranch || ''} · ${fmtTime(Date.parse(x.updated))}`)))) : [h('div', { class: 'li help' }, t('noResults'))]));
+    } catch (e) { repos.replaceChildren(h('div', { class: 'errorbox' }, e.message)); }
+  }
+  async function openRepo(x, state = 'OPEN') {
+    const st = select([['OPEN', t('prOpen')], ['MERGED', t('prMerged')], ['DECLINED', t('prDeclined')]], state, (v) => openRepo(x, v));
+    const prs = h('div', { class: 'list' }, h('div', { class: 'li help' }, '…'));
+    detail.replaceChildren(h('h3', {}, x.fullName), h('p', { class: 'help' }, x.description || ''),
+      h('div', { class: 'inline' }, h('button', { class: 'btn small primary', onclick: () => cloneFlow(x.clone.https || x.clone.ssh).catch(fail) }, t('cloneDots')),
+        h('a', { class: 'btn small', href: x.url, target: '_blank', rel: 'noopener noreferrer' }, 'bitbucket.org ↗'), st),
+      h('div', { class: 'gp-section' }, t('pullRequests')), prs);
+    try {
+      const r = await api('/api/bitbucket/prs' + q({ workspace: x.workspace, repo: x.slug, state }));
+      prs.replaceChildren(...(r.prs.length ? r.prs.map((p) => h('button', { class: 'li hub-link', onclick: () => openPr(x, p.id) }, h('span', { class: 'badge' }, `#${p.id}`),
+        h('div', { class: 'grow' }, h('div', {}, p.title), h('div', { class: 'sub' }, `${p.author} · ${p.source} → ${p.destination} · ${p.comments} 💬${p.approvals.length ? ' · ✓ ' + p.approvals.join(', ') : ''}`)))) : [h('div', { class: 'li help' }, t('noResults'))]));
+    } catch (e) { prs.replaceChildren(h('div', { class: 'errorbox' }, e.message)); }
+  }
+  async function openPr(x, id) {
+    detail.replaceChildren(h('div', { class: 'help' }, '…'));
+    let p; try { p = await api('/api/bitbucket/pr' + q({ workspace: x.workspace, repo: x.slug, id })); } catch (e) { detail.replaceChildren(h('div', { class: 'errorbox' }, e.message)); return; }
+    const out = h('div', { class: 'help' });
+    const com = h('textarea', { class: 'input', rows: 3, placeholder: t('addComment') });
+    const act = (action, extra = {}) => (e) => busy(e.currentTarget, out, async () => { await api('/api/bitbucket/pr/act', { workspace: x.workspace, repo: x.slug, id, action, ...extra }); toast('✓'); openPr(x, id); });
+    const review = `Review pull request #${p.id} "${p.title}" (${p.source} → ${p.destination}) of ${x.fullName}.\n${p.description ? 'Description: ' + p.description + '\n' : ''}\nDiff:\n\`\`\`diff\n${p.diff.slice(0, 60000)}\n\`\`\`\nList bugs, risks and improvements by severity, with file and line.`;
+    detail.replaceChildren(h('h3', {}, `#${p.id} · ${p.title}`), h('div', { class: 'sub' }, `${p.author} · ${p.source} → ${p.destination} · ${p.state}`),
+      h('div', { class: 'inline' },
+        h('button', { class: 'btn small primary', onclick: () => { m.close(); promptToAI(review); }, html: icon('spark') + t('reviewWithAI') }),
+        h('button', { class: 'btn small', onclick: act('approve') }, t('approve')),
+        h('button', { class: 'btn small', onclick: async (e) => { if (await confirmBox({ title: t('merge'), text: t('mergeQ', { src: p.source, dst: p.destination }) })) act('merge')(e); } }, t('merge')),
+        h('button', { class: 'btn small', onclick: async (e) => { if (await confirmBox({ title: t('decline'), text: t('declineQ'), danger: true })) act('decline')(e); } }, t('decline')),
+        h('a', { class: 'btn small', href: p.url, target: '_blank', rel: 'noopener noreferrer' }, '↗'), h('button', { class: 'btn small', onclick: () => openRepo(x) }, '← ' + t('pullRequests'))),
+      p.description ? h('div', { class: 'jira-text' }, p.description) : null,
+      h('pre', { class: 'codeblock', style: { maxHeight: '40vh', overflow: 'auto' }, html: diffHtml(p.diff || '(no diff)') }),
+      com, h('button', { class: 'btn small', onclick: (e) => { if (com.value.trim()) act('comment', { text: com.value })(e); } }, t('addComment')), out);
+  }
+  const folder = S.conv?.record?.cwd || S.selFolder;
+  const prBtn = folder ? h('button', { class: 'btn small', html: icon('pr') + t('prFromFolder'), onclick: () => prFromFolder(folder) }) : null;
+  const m = modal({ title: 'Bitbucket', cls: 'wide jira-panel', body: h('div', {}, h('div', { class: 'toolbar' }, ws, qi, prBtn), h('div', { class: 'split' }, repos, detail)) });
+  try {
+    const w = await api('/api/bitbucket/workspaces');
+    ws.replaceChildren(...w.workspaces.map((x) => h('option', { value: x.slug, selected: x.slug === w.current }, x.name || x.slug)));
+    loadRepos();
+  } catch (e) { repos.replaceChildren(h('div', { class: 'errorbox' }, e.message)); }
+}
+
+async function prFromFolder(folder) {
+  const title = await ask({ title: t('pr'), label: t('prTitle') });
+  if (!title) return;
+  const dst = await ask({ title: t('pr'), label: t('targetBranch'), value: S.sum.tools.bitbucket.defaultBranch || 'main' });
+  if (dst == null) return;
+  try { const r = await api('/api/bitbucket/pr/from-folder', { folder, title, destination: dst || undefined }); toast(`✓ #${r.id} ${r.title}`); if (r.url) window.open(r.url, '_blank', 'noopener'); } catch (e) { fail(e); }
 }
 
 // ------------------------------------------------------------------ Jira
@@ -1316,7 +1771,7 @@ async function installAddon(id, extra = {}) {
 async function openAddons(category = 'agents', folder) {
   let info;
   try { info = await api('/api/addons'); } catch (e) { fail(e); return; }
-  const cats = ['agents', 'gateways', 'connectors', 'skills'];
+  const cats = ['agents', 'workflows', 'gateways', 'connectors', 'skills'];
   const nav = h('nav'), section = h('section'), log = h('div', { class: 'jobs' });
   const show = (cat) => {
     category = cat;
@@ -1324,7 +1779,7 @@ async function openAddons(category = 'agents', folder) {
     section.replaceChildren(h('div', { class: 'cards' }, ...info.catalog.filter((c) => c.category === cat).map((c) => addonCard(c, folder))), h('h3', { style: { marginTop: '16px' } }, t('jobs')), log);
     if (cat === 'skills') section.prepend(skillBox(folder));
   };
-  for (const c of cats) nav.append(h('button', { 'data-cat': c, onclick: () => show(c), html: icon({ agents: 'bot', gateways: 'globe', connectors: 'plug', skills: 'puzzle' }[c]) + `<span>${esc(t('cat_' + c))}</span>` }));
+  for (const c of cats) nav.append(h('button', { 'data-cat': c, onclick: () => show(c), html: icon({ agents: 'bot', workflows: 'list', gateways: 'globe', connectors: 'plug', skills: 'puzzle' }[c]) + `<span>${esc(t('cat_' + c))}</span>` }));
   const drawJobs = () => log.replaceChildren(...(S.jobs || []).slice().reverse().map((j) => h('details', { class: 'work', open: j.status === 'running' || j.status === 'failed' ? true : null },
     h('summary', { html: `${icon(j.status === 'done' ? 'check' : j.status === 'failed' ? 'warn' : 'refresh')}<span class="cmd">${esc(j.title)}</span><span class="exit ${j.status === 'done' ? 'ok' : j.status === 'failed' ? 'bad' : 'run'}">${esc(j.status)}</span>` }),
     h('pre', { class: 'term' }, j.log || '…'))));
@@ -1345,7 +1800,7 @@ function addonCard(c, folder) {
       await installAddon(c.id, { token: tokenInput?.value || undefined, folder: f });
     } }, c.external ? t('open') + ' ↗' : c.start && c.installed ? t('start') : t('install'));
   return h('div', { class: 'card' },
-    h('div', { class: 'card-head', html: `${icon({ agents: 'bot', gateways: 'globe', connectors: 'plug', skills: 'puzzle' }[c.category])}<h4>${esc(c.name)}</h4>` }, status),
+    h('div', { class: 'card-head', html: `${icon({ agents: 'bot', workflows: 'list', gateways: 'globe', connectors: 'plug', skills: 'puzzle' }[c.category])}<h4>${esc(c.name)}</h4>` }, status),
     h('p', { class: 'help' }, c.description), h('div', { class: 'help' }, c.vendor, ' · ', h('a', { href: c.site, target: '_blank', rel: 'noopener noreferrer' }, new URL(c.site).hostname)),
     c.mcp?.tokenHelp ? h('div', { class: 'help' }, h('a', { href: c.mcp.tokenHelp, target: '_blank', rel: 'noopener noreferrer' }, `${t('getKey')} ↗`)) : null,
     tokenInput, h('div', { style: { marginTop: '8px' } }, action));
@@ -1399,7 +1854,12 @@ const SETTINGS = {
       field(t('uiMode'), select([['simple', t('simpleMode')], ['pro', t('proMode')]], s.uiMode || 'simple', (v) => { patchSettings({ uiMode: v }, true); document.body.classList.toggle('mode-simple', v === 'simple'); renderAll(); }), t('simpleHelp')),
       checkbox(t('quitOnClose'), s.quitOnWindowClose !== false, (v) => patchSettings({ quitOnWindowClose: v }, true)),
       checkbox(t('syncConfig'), s.syncConfig !== false, (v) => patchSettings({ syncConfig: v }, true)),
-      checkbox(t('transcriptCopy'), s.transcriptCopy !== false, (v) => patchSettings({ transcriptCopy: v }, true))];
+      checkbox(t('transcriptCopy'), s.transcriptCopy !== false, (v) => patchSettings({ transcriptCopy: v }, true)),
+      checkbox(t('cpSetting'), s.checkpoints !== false, (v) => patchSettings({ checkpoints: v }, true)),
+      checkbox(t('notifySetting'), s.notify !== false && typeof Notification !== 'undefined' && Notification.permission === 'granted', async (v) => { if (v && typeof Notification !== 'undefined' && Notification.permission !== 'granted') { const p = await Notification.requestPermission().catch(() => 'denied'); if (p !== 'granted') { toast(t('notifyDenied'), true); return; } } patchSettings({ notify: v }, true); }),
+      h('h3', {}, t('memUpdTitle')),
+      field(t('memUpdEvery'), select([['0', t('never')], ...[5, 6, 7, 8, 9, 10].map((n) => [String(n), t('everyN', { n })])], String(s.memoryAskEvery ?? 7), (v) => patchSettings({ memoryAskEvery: +v }, true))),
+      field(t('memUpdMode'), select([['ask', t('memModeAsk')], ['auto', t('memModeAuto')], ['manual', t('memModeManual')]], s.memoryUpdateMode || 'ask', (v) => patchSettings({ memoryUpdateMode: v }, true)), t('memUpdHelp'))];
   },
 
   models() {
@@ -1785,6 +2245,7 @@ function onEvent(e) {
     case 'turn.ack': S.ack[e.key] = { model: e.model, effort: e.effort, provider: e.provider }; if (isActive) renderStatus(); break;
     case 'usage': if (e.key) { S.usage[e.key] = e.usage; if (isActive) renderStatus(); } break;
     case 'turn.completed':
+      notifyDesktop(e.key, e.status === 'failed' ? t('notifyFailed') : t('notifyDone'));
       S.phase[e.key] = e.status === 'failed' ? 'failed' : e.status === 'interrupted' ? 'interrupted' : 'completed';
       S.turnsDone[e.key] = (S.turnsDone[e.key] || 0) + 1;
       markRunning(e.key, false);
@@ -1798,7 +2259,8 @@ function onEvent(e) {
       softReload(); break;
     case 'item.started': case 'item.completed': if (isActive) upsertItem(e.item); break;
     case 'item.delta': if (isActive) applyDelta(e.itemId, e.field, e.delta); break;
-    case 'approval.request': if (isActive) { S.conv.pending = [...(S.conv.pending || []).filter((p) => p.requestKey !== e.requestKey), e]; renderStream(); renderStatus(); } else toast(`${t('status.approval')} — ${convByKey().get(e.key)?.title || ''}`); break;
+    case 'approval.request': notifyDesktop(e.key, t('status.approval'));
+      if (isActive) { S.conv.pending = [...(S.conv.pending || []).filter((p) => p.requestKey !== e.requestKey), e]; renderStream(); renderStatus(); } else toast(`${t('status.approval')} — ${convByKey().get(e.key)?.title || ''}`); break;
     case 'approval.resolved': if (isActive && S.conv.pending?.some((p) => p.requestKey === e.requestKey)) { S.conv.pending = S.conv.pending.filter((p) => p.requestKey !== e.requestKey); renderStream(); renderStatus(); } break;
     case 'error': if (isActive) toast(e.message, !e.willRetry); break;
     case 'warning': toast(e.message); break;
@@ -1808,6 +2270,8 @@ function onEvent(e) {
     case 'addons.changed': S.addonsRefresh?.(); break;
     case 'icons.updated': S.sum.icons = e.icons; setLogos(S.sum.logos, S.sum.icons, TOKEN); renderTop(); if (S.conv || S.project) renderMain(); break;
     case 'files.changed': if (isActive && S.filesOpen) loadFiles(); break;
+    case 'spec.changed': if (S.project && e.folder && S.project.folder.toLowerCase() === e.folder.toLowerCase()) openProject(S.project.folder); break;
+    case 'memory.updated': if (e.key === S.conv?.key) { if (e.error) toast(e.error, true); else if (e.files?.length) toast(t('memUpdDone', { files: e.files.map((f) => f.split(/[\\/]/).pop()).join(', ') })); refreshMemoryInfo().then(() => renderMain()); } break;
     case 'mcp.connection': toast(`${e.label || e.name}: ${t('mcp_' + e.state)}${e.detail ? ' — ' + e.detail : ''}`, !e.ok && e.state !== 'needs-login' && e.state !== 'waiting'); break;
     default: break;
   }

@@ -64,7 +64,16 @@ A local desktop web app that replaces the Codex command window: projects as an E
 - Atlassian MCP: server names `atlassian` (Jira/Confluence) and `atlassian-bitbucket`; OAuth https://mcp.atlassian.com/v1/mcp/authv2, API token https://mcp.atlassian.com/v2/mcp (Basic base64(email:token) or Bearer service key) stored as ATLASSIAN_<NAME>_AUTH and passed via env_http_headers. Not auto-added to Claude Code when it would need a plain-text token. Bitbucket Server/Data Center: no official MCP.
 - User-kept context files: names matching LOOSE_RE (context/instructions and FR/ES/DE variants, .md/.markdown/.txt) directly in the folder and up to 3 ancestors are part of the shared context, independent of the opt-in (opt-in only governs creating .cpm files).
 
+## Decisions added in 3.3
+- User context files (LOOSE_RE: context/instructions + FR/ES/DE variants, prefixed names) are discovered in the folder, docs-like sub-folders and ≤ 6 parents; always loaded. memoryState is 'enabled' only when the conversation's own folder has files; created files are visible CONTEXT.md / INSTRUCTIONS.md in the folder (fallback: app data folder).
+- Periodic memory update: every N prompts (settings.memoryAskEvery 5–10 or 0), mode ask/auto/manual; API chats return `=== FILE: path ===` blocks, written only for requested files.
+- Connections: Jira REST v3 (`/rest/api/3/search/jql`), Bitbucket Cloud REST 2.0, secrets ATLASSIAN_ATLASSIAN_AUTH / ATLASSIAN_ATLASSIAN_BITBUCKET_AUTH shared with the MCP entries; Git tokens GIT_TOKEN_<id> injected through `-c credential.https://HOST.helper=!f(){…}` reading CPM_GIT_U<i>/CPM_GIT_P<i>. Bitbucket Git username for API tokens: x-bitbucket-api-token-auth.
+- Checkpoints: private index (GIT_INDEX_FILE) → write-tree → commit-tree → refs/cpm/<agent>-<id>/<cp>; untracked > 200 MB → tracked only; restore = `git restore --source --worktree`; max 30 per conversation.
+- Spec Kit 1.2.5 verified: `specify init --here --force --non-interactive --integration codex|claude --ignore-agent-tools --script ps|sh`; skills in .agents/skills/speckit-* (Codex, `$speckit-<phase>`) or .claude/skills (Claude, `/speckit-<phase>`).
+- Codex plugins: `marketplace/add {source}` → `{marketplaceName, installedRoot, alreadyAdded}`; path from `plugin/list`; `plugin/install {marketplacePath, pluginName}`. Claude: `claude plugin marketplace add`, `claude plugin install name@marketplace`.
+
 ## Progress
+- 2026-10-30: 3.3.0 — 73 automated tests, 54 browser flows (7 suites), Spec Kit init verified with the real CLI.
 - 2026-10-30: 3.2.0 — 62 automated tests, 42 browser flows (5 suites), real codex-cli check of the MathWorks MCP entry.
 - 2026-10-30: 3.1.0 — 55 automated tests, 36 browser flows (4 suites), Claude detection checked on a real install.
 - 2026-10-30: 3.0.0 — 50 automated tests, 32 browser flows (3 suites), real codex-cli 0.166.0 smoke test.

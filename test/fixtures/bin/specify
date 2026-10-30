@@ -1,0 +1,13 @@
+#!/bin/sh
+# Fake Spec Kit CLI for tests: records its arguments and writes the layout `specify init --here` creates (1.2.5).
+echo "$@" >> "${FAKE_SPECIFY_LOG:-/dev/null}"
+[ "$1" = "init" ] || exit 0
+integ=codex; prev=""
+for a in "$@"; do [ "$prev" = "--integration" ] && integ="$a"; prev="$a"; done
+dir=.agents/skills; [ "$integ" = "claude" ] && dir=.claude/skills
+mkdir -p .specify/memory "$dir/speckit-specify" "$dir/speckit-plan"
+printf '{"integration": "%s"}\n' "$integ" > .specify/integration.json
+printf '# [PROJECT_NAME] Constitution\n' > .specify/memory/constitution.md
+printf -- '---\nname: "speckit-specify"\n---\n\n## User Input\n\n$ARGUMENTS\n\nWrite specs/NNN-name/spec.md.\n' > "$dir/speckit-specify/SKILL.md"
+printf -- '---\nname: "speckit-plan"\n---\n\nPlan for: $ARGUMENTS\n' > "$dir/speckit-plan/SKILL.md"
+echo "Project ready."

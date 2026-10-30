@@ -27,6 +27,12 @@ Working rules agreed with the owner (Jack Salameh). Refine as preferences stabil
 - Support only agents that can be verified; prefer major agents (Codex, Claude Code) plus API providers.
 - Never ship or draw vendor logos; offer download from the vendor site or upload.
 
+## Product direction (3.3)
+- Connect once, then act from the app: Jira, Bitbucket, Git accounts and MATLAB live in the Connections menu.
+- Context and instruction files the user already has are always read; the app only offers to create them when
+  the conversation's folder has none, and asks every 5–10 prompts whether to update them.
+- Spec-driven development (Spec Kit) for larger changes, including changes to this app (see .specify/ and specs/).
+
 ## Engineering rules
 - No secrets in code, logs, chat or TOML; store them with the OS facility (DPAPI / Keychain / Secret Service) and pass them to agents as environment variables.
 - Local server binds to 127.0.0.1, checks Host/Origin and a launch token on every API call.

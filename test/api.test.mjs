@@ -79,8 +79,11 @@ test('new conversation in a new nested folder stays visible before its first mes
   // Setup window: rename + context + instructions in separate boxes.
   const setup = await api('/api/conversation/memory-setup', { key, enable: true, title: 'Focal study v2', context: 'Lens: 25 mm C-mount.', instructions: 'Answer in French. Use SI units.' });
   assert.equal(setup.status, 200, setup.error);
-  assert.match(fs.readFileSync(path.join(memDir, 'CONTEXT.md'), 'utf8'), /25 mm C-mount/);
-  assert.match(fs.readFileSync(path.join(memDir, 'INSTRUCTIONS.md'), 'utf8'), /^# Instructions — Focal study v2[\s\S]*SI units/);
+  // Created where the user expects them: visible CONTEXT.md / INSTRUCTIONS.md in the conversation folder.
+  assert.match(fs.readFileSync(path.join(folder, 'CONTEXT.md'), 'utf8'), /25 mm C-mount/);
+  assert.match(fs.readFileSync(path.join(folder, 'INSTRUCTIONS.md'), 'utf8'), /^# Instructions — Focal study v2[\s\S]*SI units/);
+  assert.ok(!fs.existsSync(path.join(memDir, 'CONTEXT.md')), 'no hidden per-conversation copy');
+  assert.deepEqual(setup.found.files.map((f) => path.basename(f.file)).sort(), ['CONTEXT.md', 'INSTRUCTIONS.md']);
   assert.ok(!fs.existsSync(path.join(folder, '.cpm', 'CONTEXT.md')), 'folder memory is not created implicitly');
   assert.equal((await api('/api/state')).conversations.find((x) => x.key === key).title, 'Focal study v2');
 });
@@ -119,9 +122,9 @@ test('conversation view: user prompt shown without injected context, rollout nam
   assert.equal(users[0].text, 'hello there');
   assert.ok(users[0].context.length > 0);
   assert.ok(c.record.rolloutName?.startsWith('rollout-'));
-  const ctx = fs.readFileSync(c.memory.conversation.context, 'utf8');
-  assert.match(ctx.split('\n')[0], /^<!-- rollout: rollout-/);
-  assert.ok(fs.existsSync(path.join(path.dirname(c.memory.conversation.context), 'TRANSCRIPT.md')));
+  const tr = fs.readFileSync(path.join(c.memory.conversation.dir, 'TRANSCRIPT.md'), 'utf8');
+  assert.match(tr.split('\n')[0], /^<!-- rollout: rollout-/, 'transcript copy names its rollout on line 1');
+  assert.equal(c.record.memoryFound.files.length, 2);
 });
 
 test('approvals: command and file change requests reach the UI and the decision reaches Codex', async () => {
@@ -179,7 +182,7 @@ test('folder rename on disk re-points conversations and memory; next turn uses t
 test('memory files: link another conversation context, conflicts and path safety', async () => {
   const other = await api('/api/conversation/new', { folder: path.join(work, 'X1191', 'Optics') });
   const cat = await api('/api/memory/catalog');
-  const focalCtx = cat.find((m) => m.key === key && m.label.endsWith('CONTEXT.md'));
+  const focalCtx = cat.find((m) => m.key === key && m.label.endsWith('— CONTEXT.md'));
   assert.ok(focalCtx);
   const head = await api('/api/conversation/new', { folder: path.join(work, 'X1191') });
   const opt = await api('/api/conversation/options', { key: head.key, links: [{ label: 'Focal', file: focalCtx.file }, { label: 'evil', file: '/etc/passwd' }] });
@@ -394,7 +397,9 @@ test('context.md / instructions.md already in the folder are loaded, even when a
   const open = await api('/api/conversation?key=' + encodeURIComponent(r.key));
   assert.deepEqual(open.record.folderFiles.map((f) => path.basename(f)), ['instructions.md', 'bench_context.md']);
   const prev = await api('/api/memory/preview?key=' + encodeURIComponent(r.key));
-  assert.equal(prev.memoryState, 'declined');
+  assert.equal(prev.memoryState, 'enabled', 'files found → loaded, nothing to ask');
+  assert.deepEqual(prev.found.files.map((f) => path.basename(f.file)), ['Context.md', 'instructions.md', 'bench_context.md']);
+  assert.ok(prev.found.searched.includes(sub) && prev.found.searched.includes(proj));
   const s = await api('/api/conversation/send', { key: r.key, text: 'hello bench' });
   assert.equal(s.status, 200, s.error);
   assert.ok(s.contextSent);
@@ -422,7 +427,7 @@ test('memory workspace: preview, pins, exclusion and diff since last send (rec. 
   await waitFor((e) => e.type === 'turn.completed' && e.key === r.key);
   assert.match(fake().threads[r.key.split(':')[1]].lastTurnParams.text, /Budget: 12 k€/);
   await new Promise((res) => setTimeout(res, 150));
-  const ctxFile = p.parts.find((x) => x.label.includes('context') && x.group === 'conversation').file;
+  const ctxFile = p.parts.find((x) => /CONTEXT\.md$/.test(x.file || '')).file;
   fs.appendFileSync(ctxFile, '\nLine B');
   p = await api(`/api/memory/preview?key=${encodeURIComponent(r.key)}`);
   const changed = p.parts.find((x) => x.file === ctxFile);

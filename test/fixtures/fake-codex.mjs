@@ -108,7 +108,9 @@ const handlers = {
   'config/mcpServer/reload': () => ({}),
   'skills/list': (p) => ({ data: p.cwds.map((cwd) => ({ cwd, skills: listSkills(cwd), errors: [] })) }),
   'mcpServerStatus/list': () => ({ data: Object.entries(load().config.mcp_servers || {}).filter(([, v]) => v.enabled !== false).map(([name]) => ({ name, tools: { tool_a: {}, tool_b: {} }, authStatus: { type: 'bearerToken' }, toolsError: null })) }),
-  'plugin/list': () => ({ marketplaces: [], marketplaceLoadErrors: [], featuredPluginIds: [] }),
+  'plugin/list': () => ({ marketplaces: (load().marketplaces || []).map((m) => ({ name: m.name, path: `${m.root}/marketplace.json`, plugins: [] })), marketplaceLoadErrors: [], featuredPluginIds: [] }),
+  'marketplace/add': (p) => { const st = load(); st.marketplaces ||= []; const name = p.source.split('/').pop().toLowerCase(); const already = st.marketplaces.some((m) => m.name === name); if (!already) st.marketplaces.push({ name, root: `/plugins/${name}` }); save(st); return { marketplaceName: name, installedRoot: `/plugins/${name}`, alreadyAdded: already }; },
+  'plugin/install': (p) => { const st = load(); (st.pluginInstalls ||= []).push(p); save(st); return { authPolicy: 'ON_INSTALL', appsNeedingAuth: [] }; },
 };
 
 function setPath(obj, keyPath, value, strategy) {

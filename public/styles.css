@@ -353,3 +353,36 @@ body.mode-simple .pro-only { display: none !important; }
 .mcp-status.ok { background: var(--ok-soft); color: var(--ok); } .mcp-status.warn { background: var(--warn-soft); color: var(--warn); } .mcp-status.bad { background: var(--danger-soft); color: var(--danger); }
 .mcp-status .copy { border: 0; background: none; cursor: pointer; color: inherit; margin-left: auto; display: grid; }
 .mcp-status .copy .ic { width: 14px; height: 14px; }
+
+/* 3.3 — loaded context files */
+.membar { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; margin-top: 4px; font-size: 12px; }
+.membar .ic { width: 13px; height: 13px; color: var(--accent); }
+.chip.small { padding: 1px 8px; font-size: 11.5px; }
+.badge.ok { background: var(--ok-soft); color: var(--ok); }
+.li.fdir { color: var(--muted); gap: 6px; display: flex; align-items: center; }
+.li.fdir .ic { width: 14px; height: 14px; }
+
+/* 3.3 — Connections, Jira and Bitbucket panels */
+.dialog.jira-panel { width: min(1240px, 96vw); }
+.jira-panel .split { display: grid; grid-template-columns: minmax(280px, 40%) 1fr; gap: 14px; margin-top: 10px; min-height: 55vh; }
+.jira-panel .jira-list { max-height: 64vh; overflow: auto; }
+.jira-panel .jira-detail { max-height: 64vh; overflow: auto; padding-right: 4px; }
+.jira-panel .jira-detail h3 { margin: 0 0 6px; }
+.jira-text { white-space: pre-wrap; font-size: 13px; line-height: 1.45; padding: 6px 0; }
+.jira-comment { border-left: 3px solid var(--line); padding: 2px 0 2px 10px; margin: 6px 0; }
+.badge.st-done { background: var(--ok-soft); color: var(--ok); }
+.badge.st-indeterminate { background: var(--accent-soft); color: var(--accent-2); }
+.badge.st-new { background: var(--panel-2); }
+.dialog.conn .settings section { max-height: 72vh; overflow: auto; padding: 4px 16px 12px; }
+.mono { font-family: var(--mono, ui-monospace, monospace); font-size: 12px; }
+@media (max-width: 760px) { .jira-panel .split { grid-template-columns: 1fr; } }
+
+.jira-panel .toolbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 6px 0; }
+.jira-panel .toolbar > select.input { width: auto; min-width: 170px; flex: 0 0 auto; }
+.jira-panel .toolbar > input.input { flex: 1 1 220px; width: auto; }
+.jira-panel .toolbar > .grow { flex: 1; }
+.jira-panel .jira-detail .chips { margin: 4px 0 8px; }
+.jira-panel .jira-detail .inline { margin: 6px 0; }
+.hub-spec .chips { margin: 6px 0 10px; }
+.progress { height: 5px; background: var(--panel-2); border-radius: 99px; overflow: hidden; margin-top: 4px; max-width: 260px; }
+.progress > div { height: 100%; background: var(--accent); }

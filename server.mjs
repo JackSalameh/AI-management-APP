@@ -86,9 +86,42 @@ export async function createServer({ dataDir = defaultDataDir(), codexHome, port
     'GET /api/secrets': () => app.listSecrets(),
     'POST /api/secrets/set': (b) => app.setSecret(b.name, b.value, b.description),
     'POST /api/secrets/remove': (b) => app.removeSecret(b.name),
+    // Connections (Jira, Bitbucket, Git accounts)
+    'GET /api/checkpoints': (q) => app.listCheckpoints(q.key),
+    'POST /api/checkpoints/preview': (b) => app.previewCheckpoint(b.key, b.id),
+    'POST /api/checkpoints/restore': (b) => app.restoreCheckpoint(b.key, b.id, b),
+    'GET /api/spec': (q) => app.specStatus(q.folder),
+    'POST /api/spec/init': (b) => app.specInit(b),
+    'POST /api/spec/phase': (b) => app.specPhase(b),
+    'GET /api/connections': () => app.conn.info(),
+    'POST /api/connections/jira': (b) => app.conn.jiraConnect(b),
+    'POST /api/jira/search': (b) => app.conn.jiraSearch(b),
+    'GET /api/jira/issue': (q) => app.conn.jiraIssue(q.key),
+    'POST /api/jira/act': (b) => app.conn.jiraAct(b),
+    'GET /api/jira/projects': () => app.conn.jiraProjects(),
+    'POST /api/jira/create': (b) => app.conn.jiraCreate(b),
+    'POST /api/connections/bitbucket': (b) => app.conn.bitbucketConnect(b),
+    'GET /api/bitbucket/workspaces': () => app.conn.bbWorkspaces(),
+    'GET /api/bitbucket/repos': (q) => app.conn.bbRepos(q),
+    'GET /api/bitbucket/prs': (q) => app.conn.bbPullRequests(q),
+    'GET /api/bitbucket/pr': (q) => app.conn.bbPullRequest(q),
+    'POST /api/bitbucket/pr/create': (b) => app.conn.bbCreatePr(b),
+    'POST /api/bitbucket/pr/from-folder': (b) => app.conn.bbPrFromFolder(b),
+    'POST /api/bitbucket/pr/act': (b) => app.conn.bbPrAction(b),
+    'POST /api/git/identity': (b) => app.conn.setGitIdentity(b),
+    'POST /api/git/account': (b) => app.conn.gitAccountSave(b),
+    'POST /api/git/account/remove': (b) => app.conn.gitAccountRemove(b.id),
+    'GET /api/git/account/repos': (q) => app.conn.gitRepos(q),
+    'POST /api/git/remote/test': (b) => app.conn.testRemote(b),
+    'POST /api/git/clone': (b) => app.conn.clone(b),
+    'POST /api/git/publish': (b) => app.conn.publish(b),
+    'POST /api/git/ssh-key': (b) => app.conn.sshKey(b),
+    'POST /api/git/ssh-test': (b) => app.conn.sshTest(b),
     'POST /api/jira/configure': (b) => app.configureJira(b),
     'POST /api/jira/login': () => app.jiraLogin(),
     'POST /api/atlassian/connect': (b) => app.connectAtlassian(b),
+    'POST /api/memory/update': (b) => app.updateMemory(b.key, b),
+    'GET /api/memory/discover': (q) => app.discoverMemory(q.folder),
     'GET /api/mcp/connection': (q) => app.mcpConnection(q.name, { waitMs: Math.min(+q.wait || 0, 30_000) }),
     'GET /api/matlab/mcp': () => app.matlabMcpInfo(),
     'POST /api/matlab/mcp/import': (b) => app.importMatlabMcp(b),
@@ -161,7 +194,7 @@ export async function createServer({ dataDir = defaultDataDir(), codexHome, port
       const result = await handler(req.method === 'GET' ? Object.fromEntries(url.searchParams) : body);
       json(res, 200, result ?? { ok: true }, security);
     } catch (e) {
-      const status = e instanceof HttpError ? e.status : e?.constructor?.name === 'RpcError' || /timed out|not running/.test(e.message) ? 502 : 500;
+      const status = e instanceof HttpError || e?.constructor?.name === 'HttpApiError' ? e.status : e?.constructor?.name === 'RpcError' || /timed out|not running/.test(e.message) ? 502 : 500;
       if (status === 500) console.error(`[${req.method} ${url.pathname}]`, e);
       json(res, e.code === 'WRITER_LOCK' || e.code === 'BUSY' ? 409 : status, { error: e.message, code: e.code || null }, security);
     }
