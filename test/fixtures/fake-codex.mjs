@@ -12,7 +12,8 @@ if (process.argv[2] !== 'app-server') { console.log('codex-cli 0.166.0 (fake)');
 const HOME = process.env.CODEX_HOME;
 const stateFile = path.join(HOME, 'fake-state.json');
 const load = () => { try { return JSON.parse(fs.readFileSync(stateFile, 'utf8')); } catch { return { threads: {}, config: {}, writes: [], locked: [] }; } };
-const save = (s) => fs.writeFileSync(stateFile, JSON.stringify(s, null, 2));
+// Atomic write: readers (the tests) must never see a half-written file.
+const save = (s) => { const tmp = `${stateFile}.${process.pid}.tmp`; fs.writeFileSync(tmp, JSON.stringify(s, null, 2)); fs.renameSync(tmp, stateFile); };
 const out = (m) => process.stdout.write(JSON.stringify(m) + '\n');
 const notify = (method, params) => out({ method, params });
 let nextServerReq = 1000; const waiting = new Map();
