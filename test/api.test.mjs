@@ -448,6 +448,57 @@ test('turn acknowledgement reports the model and effort Codex holds (rec. 6)', a
   assert.ok(ack.model);
 });
 
+test('reasoning effort: chosen level is kept with the conversation at once, sent, and confirmed by Codex (regression)', async () => {
+  const r = await api('/api/conversation/new', { folder: path.join(work, 'Effort') });
+  // chosen in the composer, no message yet: survives switching / reload
+  assert.equal((await api('/api/conversation/options', { key: r.key, modelKey: 'codex:gpt-6.1-sol', effort: 'ultra' })).status, 200);
+  assert.equal((await api(`/api/conversation?key=${encodeURIComponent(r.key)}`)).record.effort, 'ultra');
+  assert.equal((await api('/api/conversation/options', { key: r.key, modelKey: 'codex:gpt-5.5', effort: 'ultra' })).status, 400, 'level not offered by that model');
+  events = [];
+  await api('/api/conversation/send', { key: r.key, text: 'first', modelKey: 'codex:gpt-6.1-sol', effort: 'ultra' });
+  const req = await waitFor((e) => e.type === 'turn.ack' && e.key === r.key && e.requested);
+  assert.equal(req.effort, 'ultra');
+  const conf = await waitFor((e) => e.type === 'turn.ack' && e.key === r.key && e.confirmed);
+  assert.equal(conf.effort, 'ultra', 'thread/settings/updated');
+  await waitFor((e) => e.type === 'turn.completed' && e.key === r.key);
+  assert.equal(fake().threads[r.key.split(':')[1]].lastTurnParams.effort, 'ultra');
+  // change to low: the next turn uses low and Codex confirms low (not the thread's old level)
+  events = [];
+  await api('/api/conversation/options', { key: r.key, effort: 'low' });
+  await api('/api/conversation/send', { key: r.key, text: 'second no-settings-event', modelKey: 'codex:gpt-6.1-sol', effort: 'low' });
+  await waitFor((e) => e.type === 'turn.completed' && e.key === r.key);
+  const after = await waitFor((e) => e.type === 'turn.ack' && e.key === r.key && e.confirmed);
+  assert.equal(after.effort, 'low', 'thread/read after the turn');
+  assert.equal(fake().threads[r.key.split(':')[1]].lastTurnParams.effort, 'low');
+});
+
+test('memory of version 1.x (.codex-projects at the drive root or any parent) is found by thread id and loaded', async () => {
+  const root = path.join(work, 'V1Drive'), folder = path.join(root, 'X1191', 'Distance focal');
+  fs.mkdirSync(folder, { recursive: true });
+  const r = await api('/api/conversation/new', { folder, title: 'Focal v1' });
+  const id = r.key.split(':')[1];
+  const dir = path.join(root, '.codex-projects', 'conversations', 'Some old title--9e965fb14c2b');
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, 'CONTEXT.md'), `<!-- Codex rollout: rollout-2026-10-29T08-07-56-${id}.jsonl -->\n# Context\n\nLens 25 mm, pixel 3.45 um.\n`);
+  fs.writeFileSync(path.join(dir, 'INSTRUCTIONS.md'), '# Instructions\n\nAnswer in French.\n');
+  const other = path.join(root, '.codex-projects', 'conversations', 'Unrelated--000000000000');
+  fs.mkdirSync(other, { recursive: true }); fs.writeFileSync(path.join(other, 'CONTEXT.md'), '<!-- Codex rollout: rollout-x-ffffffff.jsonl -->\nNOT MINE\n');
+  const open = await api(`/api/conversation?key=${encodeURIComponent(r.key)}`);
+  assert.equal(open.record.memoryState, 'enabled', 'found → not asked');
+  assert.deepEqual(open.record.memoryFound.files.filter((f) => f.legacy).map((f) => path.basename(f.file)).sort(), ['CONTEXT.md', 'INSTRUCTIONS.md']);
+  events = [];
+  await api('/api/conversation/send', { key: r.key, text: 'go' });
+  await waitFor((e) => e.type === 'turn.completed' && e.key === r.key);
+  const sent = fake().threads[id].lastTurnParams.text;
+  assert.match(sent, /Lens 25 mm/); assert.match(sent, /Answer in French/); assert.doesNotMatch(sent, /NOT MINE/);
+  // editable from the app like any memory file
+  assert.equal((await api(`/api/memory?file=${encodeURIComponent(path.join(dir, 'CONTEXT.md'))}`)).status, 200);
+  // and any .md inside a project folder can be added by hand
+  fs.writeFileSync(path.join(folder, 'bench-notes.md'), 'Bench is on table 3.');
+  const l = await api('/api/conversation/options', { key: r.key, links: [{ file: path.join(folder, 'bench-notes.md') }, { file: '/etc/hostname' }] });
+  assert.equal(l.record.links.length, 1);
+});
+
 test('integration checks return actionable results (rec. 7)', async () => {
   const g = await api('/api/tools/check?tool=git');
   assert.ok(g.checks.length >= 1 && g.checks[0].name === 'Git');

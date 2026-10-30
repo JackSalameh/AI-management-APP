@@ -90,6 +90,7 @@ export async function createServer({ dataDir = defaultDataDir(), codexHome, port
     'GET /api/checkpoints': (q) => app.listCheckpoints(q.key),
     'POST /api/checkpoints/preview': (b) => app.previewCheckpoint(b.key, b.id),
     'POST /api/checkpoints/restore': (b) => app.restoreCheckpoint(b.key, b.id, b),
+    'POST /api/trail/init': (b) => app.trailInit(b),
     'GET /api/spec': (q) => app.specStatus(q.folder),
     'POST /api/spec/init': (b) => app.specInit(b),
     'POST /api/spec/phase': (b) => app.specPhase(b),

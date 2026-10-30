@@ -51,10 +51,13 @@ const convByKey = () => new Map((S.sum?.conversations || []).map((c) => [c.key, 
 const pk = (p) => (/^[A-Za-z]:|^\\\\/.test(p || '') ? String(p).toLowerCase() : String(p || ''));
 const settings = () => S.sum?.settings || {};
 let saveSettingsTimer;
+let pendingSettings = {};
 function patchSettings(patch, now = false) {
   Object.assign(S.sum.settings, patch);
+  // Merge with changes still waiting to be saved: two quick changes must not cancel each other.
+  pendingSettings = { ...pendingSettings, ...patch };
   clearTimeout(saveSettingsTimer);
-  const go = () => api('/api/settings', patch).catch(() => {});
+  const go = () => { const p = pendingSettings; pendingSettings = {}; api('/api/settings', p).catch(() => {}); };
   if (now) go(); else saveSettingsTimer = setTimeout(go, 300);
 }
 
@@ -492,6 +495,7 @@ async function openConversation(key, { quiet = false, limit, isNew = false, focu
     const data = await api('/api/conversation' + q({ key, ...(limit ? { limit } : {}) }));
     const keepCompose = quiet && S.conv?.key === key;
     S.conv = data; S.itemIdx = new Map(data.items.map((i) => [i.id, i]));
+    if (data.usage) S.usage[key] = data.usage;
     if (!data.draft) S.conv.draft = store.get('draft.' + key, '');
     S.selFolder = data.record.cwd;
     if (!keepCompose) {
@@ -621,6 +625,12 @@ async function openMemoryWorkspace() {
           h('button', { class: 'btn small', onclick: () => openMemoryEditor(x.file, x.label).then(() => {}) }, t('edit')));
       })),
       p.found?.searched?.length ? h('details', {}, h('summary', { class: 'help', style: { cursor: 'pointer' } }, t('memSearched')), ...p.found.searched.map((d) => h('div', { class: 'mono help' }, d))) : null,
+      h('div', { class: 'inline' }, h('button', { class: 'btn small', html: icon('link') + t('useFileAsContext'), onclick: async () => {
+        const v = await ask({ title: t('useFileAsContext'), label: t('filePath'), help: S.sum.platform === 'win32' ? 'D:\\X1191\\notes\\context.md' : '/home/me/project/context.md' });
+        if (!v) return;
+        const cur = (S.conv.memory?.links || []);
+        try { const r = await api('/api/conversation/options', { key, links: [...cur, { file: v.trim().replace(/^"|"$/g, ''), label: v.trim().split(/[\\/]/).pop() }] }); if (r.record.links.length === cur.length) { toast(t('notAContextFile'), true); return; } await refreshMemoryInfo(); draw(); } catch (e) { fail(e); }
+      } })),
       p.warnings?.length ? h('div', { class: 'help' }, p.warnings.join('\n')) : null);
   };
   const mm = modal({ title: t('memoryWorkspace'), cls: 'mid', body, onClose: () => refreshMemoryInfo() });
@@ -640,7 +650,7 @@ function renderMain() {
     r.rolloutName ? [' ', h('button', { 'data-tip': t('rollout'), onclick: () => r.rollout && api('/api/reveal', { path: r.rollout }).catch(fail) }, `(${r.rolloutName})`)] : null);
   $.status = h('div', { class: 'status-chip-wrap' });
   const mf = r.memoryFound?.files || [];
-  const short = (f) => (f.current ? '' : f.folder.split(/[\\/]/).filter(Boolean).pop() + '/') + f.file.split(/[\\/]/).pop();
+  const short = (f) => (f.current ? '' : f.folder.split(/[\\/]/).filter(Boolean).pop() + '/') + f.file.split(/[\\/]/).pop() + (f.legacy ? ` (${t('fromV1')})` : '');
   const membar = h('div', { class: 'membar' }, h('span', { html: icon('book') }),
     mf.length ? [h('span', { class: 'help' }, t('memLoaded')), ...mf.map((f) => h('button', { class: 'chip small', title: f.file, onclick: () => openMemoryEditor(f.file, short(f)) }, short(f)))]
       : [h('span', { class: 'help' }, t('memNone')), h('button', { class: 'chip small', onclick: () => memorySetupDialog(S.conv.key, { isNew: false }) }, '+ ' + t('createFiles'))]);
@@ -676,8 +686,29 @@ function renderStatus() {
   const tip = ack ? `${t('ackLabel')}: ${ack.model || '?'}${ack.effort ? ' · ' + effortLabel(ack.effort) : ''}${ack.provider ? ' · ' + ack.provider : ''}` : '';
   $.status.replaceChildren(
     ph ? h('span', { class: `agent-pill status-${ph}`, 'data-tip': tip || t('status.' + ph) }, h('span', { class: `dot ${cls}` }), t('status.' + ph)) : null,
-    ack ? h('span', { class: 'badge', 'data-tip': tip }, `${ack.model || ''}${ack.effort ? ' · ' + effortLabel(ack.effort) : ''}`) : null,
-    use ? h('span', { class: 'badge', 'data-tip': t('tokens') }, `${fmtNum(use)} ${t('tokens')}`) : null);
+    ack ? h('span', { class: `badge ${ack.mismatch ? 'warn' : ack.confirmed ? 'ok' : ''}`, 'data-tip': ack.mismatch ? t('effortMismatch', { wanted: effortLabel(ack.wanted), used: effortLabel(ack.effort) }) : `${tip} · ${ack.confirmed ? t('ackConfirmed') : t('ackRequested')}` }, `${ack.model || ''}${ack.effort ? ' · ' + effortLabel(ack.effort) : ''}${ack.confirmed && !ack.mismatch ? ' ✓' : ''}`) : null,
+    ...usageBadges(use));
+}
+
+/** In / Out / Cache, always the three values; details (last turn, cache read/write, reasoning, context) in the tooltip. */
+function usageBadges(u) {
+  const T = u?.total;
+  if (!T) return [];
+  const k = (n) => (n >= 1e6 ? (n / 1e6).toFixed(2) + 'M' : n >= 1000 ? (n / 1000).toFixed(1) + 'k' : String(n));
+  const L = u.last;
+  const weighted = Math.round(T.input + 0.1 * T.cacheRead + 1.25 * T.cacheWrite);
+  const tip = [
+    `${t('tokIn')}: ${T.input.toLocaleString()} · ${t('tokOut')}: ${T.output.toLocaleString()}${T.reasoning ? ` (${t('tokReasoning')} ${T.reasoning.toLocaleString()})` : ''}`,
+    `${t('tokCacheRead')}: ${T.cacheRead.toLocaleString()} · ${t('tokCacheWrite')}: ${T.cacheWrite.toLocaleString()}`,
+    L ? `${t('tokLast')}: ${t('tokIn')} ${k(L.input)} · ${t('tokOut')} ${k(L.output)} · ${t('tokCache')} ${k(L.cacheRead + L.cacheWrite)}` : '',
+    u.contextWindow && u.contextUsed != null ? `${t('tokContext')}: ${k(u.contextUsed)} / ${k(u.contextWindow)} (${Math.round((100 * u.contextUsed) / u.contextWindow)} %)` : '',
+    `${t('tokWeighted')}: ${weighted.toLocaleString()}`,
+    u.source === 'history' ? t('tokFromHistory') : '',
+  ].filter(Boolean).join('\n');
+  const pct = u.contextWindow && u.contextUsed != null ? Math.round((100 * u.contextUsed) / u.contextWindow) : null;
+  return [h('span', { class: 'usage', 'data-tip': tip },
+    h('span', {}, h('b', {}, t('tokIn')), ' ', k(T.input)), h('span', {}, h('b', {}, t('tokOut')), ' ', k(T.output)), h('span', {}, h('b', {}, t('tokCache')), ' ', k(T.cacheRead + T.cacheWrite)),
+    pct != null ? h('span', { class: pct > 80 ? 'hot' : '' }, pct < 1 ? '<1 %' : `${pct} %`) : null)];
 }
 const fmtNum = (u) => { const n = typeof u === 'number' ? u : u?.total?.totalTokens ?? u?.totalTokens ?? u?.total_tokens ?? u?.last?.totalTokens ?? null; return n == null ? '—' : n >= 1000 ? (n / 1000).toFixed(1) + 'k' : String(n); };
 
@@ -740,7 +771,7 @@ function renderProject(hidden) {
       h('button', { class: 'btn small', onclick: () => openAddons('skills', P.folder), html: icon('plus') + t('addSkill') }));
     const filesCard = h('section', { class: 'card hub-files' }, h('h3', { html: icon('folder') + esc(t('files')) }), renderFiles());
     const readme = h('section', { class: 'card hub-readme' }, h('h3', { html: icon('fileText') + 'README' }), d.readme ? h('div', { class: 'msg-agent', html: renderMarkdown(d.readme) }) : h('p', { class: 'help' }, t('noReadme')));
-    grid.append(convCard, specCard(P.folder, d), filesCard, memCard, skillCard, gitCard, readme);
+    grid.append(convCard, specCard(P.folder, d), filesCard, memCard, trailCard(P.folder, d), skillCard, gitCard, readme);
   }
   $.main.replaceChildren(head, body);
 }
@@ -778,6 +809,16 @@ function specCard(folder, d) {
       ...['spec', 'plan', 'tasks'].filter((k) => f[k]).map((k) => h('button', { class: 'btn small', onclick: () => openMemoryEditorOrPreview(f[k], `${f.name}/${k}.md`) }, k)),
       f.next !== 'done' ? h('button', { class: 'btn small primary', onclick: run(f.next) }, `${t('next')}: ${t('ph_' + f.next)}`) : h('span', { class: 'badge ok' }, '✓'))))
       : h('p', { class: 'help' }, t('specNoFeature')));
+  return card;
+}
+function trailCard(folder, d) {
+  const tr = d.trail || {};
+  const card = h('section', { class: 'card' }, h('h3', { html: icon('history') + esc(t('trailTitle')) }), h('p', { class: 'help' }, t('trailIntro')));
+  if (!tr.installed) card.append(h('button', { class: 'btn small', onclick: () => openAddons('workflows', folder) }, t('trailInstall')));
+  else if (!tr.initialized) card.append(h('button', { class: 'btn small primary', onclick: async () => { try { await api('/api/trail/init', { folder }); toast(t('trailSettingUp')); } catch (e) { fail(e); } } }, t('specSetUp')));
+  else card.append(h('div', { class: 'help' }, `${t('trailLearnings')}: ${tr.learnings.length}`),
+    tr.learnings.length ? h('div', { class: 'list' }, ...tr.learnings.slice(0, 8).map((l) => h('button', { class: 'li hub-link', onclick: () => openMemoryEditorOrPreview(l.file, l.name) }, h('span', { html: icon('fileText') }), h('div', { class: 'grow' }, l.name)))) : h('p', { class: 'help' }, t('trailNone')),
+    h('button', { class: 'btn small', onclick: () => promptToAI(t('trailNotePrompt'), folder) }, t('trailNote')));
   return card;
 }
 const PHASE_ICON = { constitution: '§', specify: '①', clarify: '?', plan: '②', tasks: '③', analyze: '⚖', implement: '④' };
@@ -968,10 +1009,11 @@ function renderComposer() {
       renderMain(); return;
     }
     const m = models.find((x) => x.key === e.target.value); S.compose.modelKey = m.key; S.compose.effort = chooseEffort(m, S.compose.effort); patchSettings({ lastModelKey: m.key }); refreshEffort();
+    saveComposeChoice();
   } },
     ...models.map((m) => h('option', { value: m.key, selected: m.key === S.compose.modelKey }, (m.isDefault ? '★ ' : '') + m.label + mark(m))),
     h('option', { value: '__refresh' }, `↻ ${t('detectModels')}`));
-  const effortSel = h('select', { class: 'sel', 'data-tip': t('effort'), 'data-tip-pos': 'up', onchange: (e) => { S.compose.effort = e.target.value; const m = models.find((x) => x.key === S.compose.modelKey); if (m) patchSettings({ modelEfforts: { ...(settings().modelEfforts || {}), [m.key]: e.target.value } }); } });
+  const effortSel = h('select', { class: 'sel', 'data-tip': t('effort'), 'data-tip-pos': 'up', onchange: (e) => { S.compose.effort = e.target.value; const m = models.find((x) => x.key === S.compose.modelKey); if (m) patchSettings({ modelEfforts: { ...(settings().modelEfforts || {}), [m.key]: e.target.value } }); saveComposeChoice(); } });
   const refreshEffort = () => {
     const m = models.find((x) => x.key === S.compose.modelKey);
     const list = m?.efforts?.length ? m.efforts : [];
@@ -1069,6 +1111,13 @@ function composerBanner() {
   return h('div', { class: `banner ${b.kind}` }, h('span', { html: icon(b.kind === 'info' ? 'info' : 'warn') }), h('span', { style: { whiteSpace: 'pre-wrap' } }, b.text),
     h('span', { class: 'x', style: { display: 'flex', gap: '6px', alignItems: 'center', flexWrap: 'wrap' } }, b.extra || null, ...(b.actions || []).map((a, i) => h('button', { class: `btn small${b.extra && i === 0 ? ' primary' : ''}`, onclick: a.run }, a.label)),
       b === S.banner ? ib('close', t('close'), () => { S.banner = null; renderMain(); }) : null));
+}
+
+/** The model and effort picked in the composer belong to the conversation right away (survive switching and reload). */
+function saveComposeChoice() {
+  if (!S.conv) return;
+  const key = S.conv.key, body = { key, modelKey: S.compose.modelKey || undefined, effort: S.compose.effort || undefined };
+  api('/api/conversation/options', body).then(() => { if (S.conv?.key === key) { S.conv.record.modelKey = body.modelKey; S.conv.record.effort = body.effort; } }).catch((e) => toast(e.message, true));
 }
 
 let draftTimer;
@@ -2242,7 +2291,13 @@ function onEvent(e) {
       S.phase[e.key] = 'running';
       if (isActive) { S.conv.running = true; renderMain(); }
       markRunning(e.key, true); break;
-    case 'turn.ack': S.ack[e.key] = { model: e.model, effort: e.effort, provider: e.provider }; if (isActive) renderStatus(); break;
+    case 'turn.ack': {
+      const prev = S.ack[e.key];
+      // A requested value never overwrites a confirmed one of the same turn; a confirmation that differs is flagged.
+      if (e.requested) S.ack[e.key] = { model: e.model, effort: e.effort, provider: e.provider, requested: true, wanted: e.effort };
+      else S.ack[e.key] = { model: e.model || prev?.model, effort: e.effort || prev?.effort, provider: e.provider || prev?.provider, confirmed: true, wanted: prev?.wanted, mismatch: !!(prev?.wanted && e.effort && e.effort !== prev.wanted) };
+      if (isActive) renderStatus(); break;
+    }
     case 'usage': if (e.key) { S.usage[e.key] = e.usage; if (isActive) renderStatus(); } break;
     case 'turn.completed':
       notifyDesktop(e.key, e.status === 'failed' ? t('notifyFailed') : t('notifyDone'));

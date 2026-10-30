@@ -36,10 +36,10 @@ const stub = http.createServer((req, res) => {
       if (j.reasoning_effort && j.model === 'mistral-y') { res.writeHead(400); return res.end(JSON.stringify({ error: { message: 'reasoning_effort not supported' } })); }
       const last = j.messages.at(-1).content;
       const text = Array.isArray(last) ? last.find((c) => c.type === 'text').text : last;
-      return sse([{ choices: [{ delta: { content: 'Hello ' } }] }, { choices: [{ delta: { content: `OA:${text}` } }] }, { choices: [], usage: { total_tokens: 12 } }]);
+      return sse([{ choices: [{ delta: { content: 'Hello ' } }] }, { choices: [{ delta: { content: `OA:${text}` } }] }, { choices: [], usage: { prompt_tokens: 900, prompt_tokens_details: { cached_tokens: 600 }, completion_tokens: 40, completion_tokens_details: { reasoning_tokens: 10 }, total_tokens: 940 } }]);
     }
     if (req.url.startsWith('/an/v1/models')) return res.end(JSON.stringify({ data: [{ id: 'claude-z' }] }));
-    if (req.url === '/an/v1/messages') return sse([{ type: 'message_start' }, { type: 'content_block_delta', delta: { type: 'text_delta', text: `AN:${j.messages.at(-1).content}` } }, { type: 'message_delta', usage: { input_tokens: 3, output_tokens: 4 } }]);
+    if (req.url === '/an/v1/messages') return sse([{ type: 'message_start', message: { usage: { input_tokens: 30, cache_read_input_tokens: 500, cache_creation_input_tokens: 70, output_tokens: 1 } } }, { type: 'content_block_delta', delta: { type: 'text_delta', text: `AN:${j.messages.at(-1).content}` } }, { type: 'message_delta', usage: { output_tokens: 44 } }]);
     if (req.url.startsWith('/ge/v1beta/models?')) return res.end(JSON.stringify({ models: [{ name: 'models/gemini-q', supportedGenerationMethods: ['generateContent'] }, { name: 'models/embed', supportedGenerationMethods: ['embedContent'] }] }));
     if (req.url.startsWith('/ge/v1beta/models/gemini-q:streamGenerateContent')) return sse([{ candidates: [{ content: { parts: [{ text: `GE:${j.contents.at(-1).parts.at(-1).text}` }] } }], usageMetadata: { totalTokenCount: 9 } }]);
     if (req.url === '/mem/v1/chat/completions') {
@@ -435,4 +435,49 @@ test('Ways of working: Ponytail plugin installed in Codex from its marketplace; 
   const r2 = await api('/api/addons/install', { id: 'rea', targets: ['codex'] });
   await waitFor((e) => e.type === 'job.update' && e.job.id === r2.job && e.job.status !== 'running', 10_000);
   assert.deepEqual(fake().config.mcp_servers.rea, { command: 'npx', args: ['-y', 'rea-agents@6.8.0', 'mcp'], enabled: true });
+});
+
+
+test('tokens: input, output and cache from Codex (live and from the rollout), OpenAI-compatible and Anthropic APIs', async () => {
+  const folder = path.join(work, 'Tokens'); fs.mkdirSync(folder, { recursive: true });
+  const c = await api('/api/conversation/new', { folder });
+  events = [];
+  await api('/api/conversation/send', { key: c.key, text: 'count please' });
+  const ev = await waitFor((e) => e.type === 'usage' && e.key === c.key);
+  assert.deepEqual(ev.usage.total, { input: 200, cacheRead: 1000, cacheWrite: 0, output: 300, reasoning: 100 }, 'input excludes cached tokens');
+  assert.equal(ev.usage.contextWindow, 272000); assert.equal(ev.usage.contextUsed, 1200);
+  await waitFor((e) => e.type === 'turn.completed' && e.key === c.key);
+  assert.deepEqual((await api(`/api/conversation?key=${encodeURIComponent(c.key)}`)).usage.total.cacheRead, 1000, 'kept with the conversation');
+  // a conversation the app has never seen: computed from its rollout file
+  const rec = srv.app.s.conversations[c.key]; delete rec.usage;
+  const again = await api(`/api/conversation?key=${encodeURIComponent(c.key)}`);
+  assert.equal(again.usage.source, 'history'); assert.deepEqual(again.usage.total, { input: 200, cacheRead: 1000, cacheWrite: 0, output: 300, reasoning: 100 });
+  // OpenAI-compatible: cached prompt tokens split out, two turns summed
+  const p = await api('/api/providers/save', { preset: 'custom', label: 'Usage OA', baseUrl: `${SB}/oa/v1`, keyName: '', models: ['gpt-x'] });
+  const a = `api-${p.provider.id}`;
+  const o = await api('/api/conversation/new', { agent: a, folder, modelKey: `${a}:gpt-x` });
+  for (const txt of ['one', 'two']) { events = []; await api('/api/conversation/send', { key: o.key, text: txt, modelKey: `${a}:gpt-x` }); await waitFor((e) => e.type === 'turn.completed' && e.key === o.key); }
+  assert.equal(seen.filter((r) => r.url === '/oa/v1/chat/completions').at(-1).body.stream_options.include_usage, true, 'usage requested from the stream');
+  const ou = (await api(`/api/conversation?key=${encodeURIComponent(o.key)}`)).usage;
+  assert.deepEqual(ou.total, { input: 600, cacheRead: 1200, cacheWrite: 0, output: 80, reasoning: 20 });
+  // Anthropic: input / cache read / cache write from message_start, output from message_delta
+  const an = await api('/api/providers/save', { preset: 'anthropic', label: 'Usage AN', baseUrl: `${SB}/an`, keyName: '', models: ['claude-z'] });
+  const b = `api-${an.provider.id}`;
+  const x = await api('/api/conversation/new', { agent: b, folder, modelKey: `${b}:claude-z` });
+  events = []; await api('/api/conversation/send', { key: x.key, text: 'hi', modelKey: `${b}:claude-z` }); await waitFor((e) => e.type === 'turn.completed' && e.key === x.key);
+  assert.deepEqual((await api(`/api/conversation?key=${encodeURIComponent(x.key)}`)).usage.total, { input: 30, cacheRead: 500, cacheWrite: 70, output: 44, reasoning: 0 });
+});
+
+test('Trail: set up in a folder (trail init --yes <dir>), learnings listed in the project overview', async () => {
+  process.env.FAKE_TRAIL_LOG = path.join(root, 'trail.log');
+  const folder = path.join(work, 'TrailProj'); fs.mkdirSync(folder, { recursive: true });
+  await api('/api/conversation/new', { folder });
+  assert.equal((await api(`/api/project?folder=${encodeURIComponent(folder)}`)).trail.initialized, false);
+  events = [];
+  const j = await api('/api/trail/init', { folder });
+  await waitFor((e) => e.type === 'job.update' && e.job.id === j.job && e.job.status !== 'running');
+  assert.match(fs.readFileSync(process.env.FAKE_TRAIL_LOG, 'utf8'), new RegExp(`^init --yes ${folder.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'm'));
+  const hub = await api(`/api/project?folder=${encodeURIComponent(folder)}`);
+  assert.equal(hub.trail.initialized, true);
+  assert.deepEqual(hub.trail.learnings.map((l) => l.name), ['2026-10-30-kaiser']);
 });

@@ -297,3 +297,19 @@ test('Codex agent refuses to start once the app is closing (no orphan app-server
   a.closed = true;
   await assert.rejects(() => a.start(), /closing/);
 });
+
+
+test('usage: Claude Code session file summed once per API message (lines repeat the same usage)', async () => {
+  const { usageFromFile } = await import('../lib/usage.mjs');
+  const f = path.join(os.tmpdir(), `cpm-claude-${Date.now()}.jsonl`);
+  const u = { input_tokens: 10, cache_read_input_tokens: 2000, cache_creation_input_tokens: 300, output_tokens: 50 };
+  fs.writeFileSync(f, [
+    { type: 'user', message: { content: 'hi' } },
+    { type: 'assistant', uuid: 'a', message: { id: 'msg_1', usage: u, content: [{ type: 'thinking' }] } },
+    { type: 'assistant', uuid: 'b', message: { id: 'msg_1', usage: u, content: [{ type: 'text', text: 'x' }] } },
+    { type: 'assistant', uuid: 'c', message: { id: 'msg_2', usage: { ...u, output_tokens: 70 }, content: [] } },
+  ].map((o) => JSON.stringify(o)).join('\n'));
+  const r = await usageFromFile(f, 'claude');
+  assert.deepEqual(r.total, { input: 20, cacheRead: 4000, cacheWrite: 600, output: 120, reasoning: 0 });
+  assert.equal(r.requests, 2);
+});

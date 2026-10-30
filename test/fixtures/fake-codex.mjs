@@ -34,6 +34,9 @@ function writeRollout(t) {
     if (it.type === 'userMessage') lines.push({ type: 'response_item', payload: { type: 'message', role: 'user', content: it.content.map((c) => ({ type: 'input_text', text: c.text })) } });
     if (it.type === 'agentMessage') lines.push({ type: 'event_msg', payload: { type: 'agent_message', message: it.text } });
   }
+  // like codex-cli: a token_count event with the running total, the last request and the context window
+  const n = t.turns.length;
+  lines.push({ type: 'event_msg', payload: { type: 'token_count', info: { total_token_usage: { input_tokens: 1200 * n, cached_input_tokens: 1000 * n, output_tokens: 300 * n, reasoning_output_tokens: 100 * n, total_tokens: 1500 * n }, last_token_usage: { input_tokens: 1200, cached_input_tokens: 1000, output_tokens: 300, reasoning_output_tokens: 100, total_tokens: 1500 }, model_context_window: 272000 } } });
   fs.writeFileSync(path.join(dir, `rollout-${t.id}.jsonl`), lines.map((l) => JSON.stringify(l)).join('\n') + '\n');
 }
 
@@ -50,6 +53,9 @@ async function runTurn(threadId, params) {
   notify('item/completed', { threadId, turnId, item: user });
   if (!t.preview) t.preview = text.slice(0, 80);
   t.lastTurnParams = { cwd: params.cwd, model: params.model, effort: params.effort, approvalPolicy: params.approvalPolicy, sandboxPolicy: params.sandboxPolicy, text: full };
+  // Like codex-cli: a turn override changes the thread's settings for this and later turns.
+  if (params.effort) t.effort = params.effort; if (params.model) t.model = params.model;
+  if (!/no-settings-event/.test(text)) notify('thread/settings/updated', { threadId, threadSettings: { model: t.model || 'gpt-6.1-sol', modelProvider: t.provider || 'openai', effort: t.effort || null } });
   if (/crash/.test(text)) { process.exit(3); }
   if (/run/.test(text)) {
     const cmd = { type: 'commandExecution', id: crypto.randomUUID(), command: 'echo hello', cwd: params.cwd || t.cwd, status: 'inProgress', commandActions: [{ type: 'read', command: 'cat notes.md', name: 'notes.md', path: 'notes.md' }], aggregatedOutput: null, exitCode: null, durationMs: null, source: 'agent', processId: null, pluginId: null, scriptPath: null };
@@ -81,8 +87,11 @@ async function runTurn(threadId, params) {
   if (turn.status === 'failed') turn.error = { message: 'Simulated failure', codexErrorInfo: null, additionalDetails: null, misalignment: null };
   active.delete(threadId);
   const s2 = load(); const t2 = s2.threads[threadId];
-  t2.turns.push(turn); t2.updatedAt = now(); t2.preview = t.preview; t2.lastTurnParams = t.lastTurnParams;
+  t2.turns.push(turn); t2.updatedAt = now(); t2.preview = t.preview; t2.lastTurnParams = t.lastTurnParams; t2.effort = t.effort; t2.model = t.model;
   save(s2); writeRollout(t2);
+  const k = t2.turns.length;
+  const bd = (m) => ({ totalTokens: 1500 * m, inputTokens: 1200 * m, cachedInputTokens: 1000 * m, cacheWriteInputTokens: 0, outputTokens: 300 * m, reasoningOutputTokens: 100 * m });
+  notify('thread/tokenUsage/updated', { threadId, turnId, tokenUsage: { total: bd(k), last: bd(1), modelContextWindow: 272000 } });
   notify('turn/completed', { threadId, turn });
 }
 

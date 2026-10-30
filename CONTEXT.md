@@ -72,7 +72,14 @@ A local desktop web app that replaces the Codex command window: projects as an E
 - Spec Kit 1.2.5 verified: `specify init --here --force --non-interactive --integration codex|claude --ignore-agent-tools --script ps|sh`; skills in .agents/skills/speckit-* (Codex, `$speckit-<phase>`) or .claude/skills (Claude, `/speckit-<phase>`).
 - Codex plugins: `marketplace/add {source}` → `{marketplaceName, installedRoot, alreadyAdded}`; path from `plugin/list`; `plugin/install {marketplacePath, pluginName}`. Claude: `claude plugin marketplace add`, `claude plugin install name@marketplace`.
 
+## Decisions added in 3.4
+- Version 1.x memory layout (from the original transcript): `<dir>\.codex-projects\conversations\<Title>--<hash12>\{CONTEXT,INSTRUCTIONS}.md`, line 1 `<!-- Codex rollout: rollout-<ts>-<threadId>.jsonl -->`; searched from the conversation folder up to the drive root; match thread id > rollout name > title.
+- Effort: composer choice persisted via /api/conversation/options; chip = requested, then confirmed by `thread/settings/updated` (ThreadSettings.effort) or `thread/read` after turn completion. Verified on real codex-cli 0.166: a `turn/start` effort override is applied (thread/read → requested level).
+- Token model (lib/usage.mjs): { input (uncached), output, cacheRead, cacheWrite, reasoning }; Codex totals are the thread's running total, Claude/API totals are summed per turn and kept in the conversation record.
+- Trail-Code 0.28.0: `trail init --yes <dir>` non-interactive; native tree-sitter build may need build tools.
+
 ## Progress
+- 2026-10-30: 3.4.0 — 79 automated tests, 57 browser flows (8 suites).
 - 2026-10-30: 3.3.0 — 73 automated tests, 54 browser flows (7 suites), Spec Kit init verified with the real CLI.
 - 2026-10-30: 3.2.0 — 62 automated tests, 42 browser flows (5 suites), real codex-cli check of the MathWorks MCP entry.
 - 2026-10-30: 3.1.0 — 55 automated tests, 36 browser flows (4 suites), Claude detection checked on a real install.

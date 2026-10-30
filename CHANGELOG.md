@@ -1,5 +1,31 @@
 # Changelog
 
+## 3.4.0 — 2026-10-30
+
+### Fixed
+- **Existing context and instructions were not found**: version 1.x kept them in
+  `<drive or parent>\.codex-projects\conversations\<Title>--<id>\CONTEXT.md / INSTRUCTIONS.md` (e.g.
+  `D:\.codex-projects\…`), a place the rebuild never searched. They are now found from the conversation folder up
+  to the drive root, matched by the thread id or rollout name written on line 1 (else by title), loaded, editable,
+  and shown as “CONTEXT.md (from version 1)”. Folder-level 1.x memory (`.codex-projects\folders\`) too.
+  Any other `.md` / `.txt` file can be added by hand (Memory workspace › “Use a file as context…”).
+- **A new reasoning level seemed ignored**: the level chosen in the composer is now saved with the conversation at
+  once (it was lost when switching conversation or reloading before sending); the status chip shows the level
+  requested, then the level Codex confirms (✓) from `thread/settings/updated` or from the thread after the reply —
+  it used to read the thread too early and show the previous level. A mismatch is flagged.
+- Two settings changed within 300 ms could cancel each other (now merged).
+- An error inside one agent event could stop the conversation's event stream (now isolated and logged).
+
+### New
+- **Tokens: In / Out / Cache**, always the three values, for every AI:
+  Codex (live `thread/tokenUsage/updated`, and from the rollout's `token_count` events for older conversations),
+  Claude Code (turn result; session files summed once per API message), API services (Anthropic message_start /
+  message_delta, OpenAI-compatible `stream_options.include_usage` with cached prompt tokens split out, Gemini
+  usageMetadata). Tooltip: cache read vs written, reasoning tokens, last turn, context window used, and a
+  cache-weighted input (reads × 0.1, writes × 1.25 — the convention used by Trail-Code's benchmark).
+- **Trail (trailhq/Trail-Code)** in Add-ons › Ways of working, and a “Code map & learnings” card in the project
+  overview: set up in the folder (`trail init --yes <folder>`), list the repository's learnings, “Save what we learned”.
+
 ## 3.3.0 — 2026-10-30
 
 ### New

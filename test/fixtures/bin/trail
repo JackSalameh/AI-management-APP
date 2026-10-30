@@ -1,0 +1,4 @@
+#!/bin/sh
+# Fake Trail CLI for tests: `trail init --yes <dir>` creates .trail/learnings.
+echo "$@" >> "${FAKE_TRAIL_LOG:-/dev/null}"
+if [ "$1" = "init" ]; then mkdir -p "$3/.trail/learnings"; printf '# Use Kaiser windows\n' > "$3/.trail/learnings/2026-10-30-kaiser.md"; echo "wired"; fi
