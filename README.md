@@ -59,13 +59,17 @@ Settings from *Codex Projects Management* (earlier name) are imported automatica
 - **Simple / Pro** — Simple shows only what is needed to chat; Pro adds Git, action modes and advanced memory.
 - **Reliability** — server-side drafts, clear recovery messages, backups with restore, redacted diagnostics,
   integration tests with suggested fixes in every tool card. English, Français, Español, Deutsch; light/dark.
-- **Official tool icons** — *Configuration › Appearance › Download official icons* fetches each vendor's own
-  website icon onto your computer (they are not shipped with the app), or upload your own.
+- **Official tool icons** — downloaded automatically from each vendor's website onto your computer on first
+  start (they are not shipped inside the app); you can also upload your own in *Configuration › Appearance*.
+- **Your models** — the model list shows what your account can use (★ = your default) with the reasoning levels
+  available for each model; *↻ Detect my models again* refreshes it after you change plan or key.
+- **Files of a conversation** — the 📄 button lists files the agent changed or read, your attachments and the
+  memory files, with preview and the diff made in this conversation.
 
 ## 4. Development
 
 ```bash
-npm test          # 50 unit + API tests (protocol-faithful fake Codex, stub API providers)
+npm test          # 55 unit + API tests (protocol-faithful fake Codex, stub API providers)
 npm run demo      # sandbox UI with sample data and simulated providers
 node server.mjs   # server only; prints the URL with its session token
 ```

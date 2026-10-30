@@ -1,5 +1,22 @@
 # Changelog
 
+## 3.1.0 — 2026-10-30
+
+### New
+- Official tool icons appear automatically: on first start the app downloads each vendor's official image
+  (VS Code brand icon, Git logo, MATLAB, Jira — from your own Jira site when configured — Bitbucket, OpenAI,
+  Claude) to your data folder; retried daily while any is missing; uploads are never overwritten.
+- Models and reasoning levels come from your account: Codex `model/list`; Claude Code effort levels read from
+  the installed CLI, models from aliases, your default, your Anthropic key and your past sessions; API services
+  from their `/models` endpoints with reasoning levels from provider metadata (OpenRouter, Gemini) or documented
+  model families. "↻ Detect my models again" in the model list; ★ marks your default.
+- Files panel per conversation: files changed (with this conversation's diff) and read by the agent,
+  attachments, memory files; preview, open in VS Code or the file explorer.
+
+### Fixed (found by tests)
+- Code highlighter broke on the word "class" inside its own markup (previews showed `class="tk-num">`).
+
+
 ## 3.0.0 — 2026-10-30 — renamed **AI Management APP**
 
 ### New

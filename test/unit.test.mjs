@@ -234,3 +234,11 @@ test('rename: settings of Codex Projects Management are imported once', async ()
   assert.ok(!fs.existsSync(path.join(neu, 'instance.json')), 'running-instance lock not copied');
   assert.equal(migrateLegacyDataDir(neu, {}, 'linux'), null, 'only once');
 });
+
+test('code highlighter never re-matches its own markup and escapes HTML', async () => {
+  const { highlightCode } = await import('../public/markdown.js');
+  assert.equal(highlightCode('Pixel pitch 3.45 um', 'txt'), 'Pixel pitch <span class="tk-num">3.45</span> um');
+  const h = highlightCode('class A: s = "x" # 3 in class', 'py');
+  assert.equal((h.match(/<span/g) || []).length, 3, h);
+  assert.ok(!highlightCode('<img src=x onerror=alert(1)>', 'js').includes('<img'));
+});

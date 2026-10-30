@@ -159,7 +159,8 @@ function buildShell() {
   $.side = h('aside', { class: 'sidebar' });
   $.main = h('main', { class: 'main' });
   $.gitp = h('aside', { class: 'gitpanel hidden' });
-  $.body = h('div', { class: 'body' }, $.side, $.main, $.gitp);
+  $.filesp = h('aside', { class: 'gitpanel filespanel hidden' });
+  $.body = h('div', { class: 'body' }, $.side, $.main, $.gitp, $.filesp);
   app.append($.top, $.body);
 }
 
@@ -486,7 +487,7 @@ async function openConversation(key, { quiet = false, limit, isNew = false, focu
       S.compose = { modelKey: m?.key || null, effort: chooseEffort(m, data.record.effort), mode: data.record.actionMode || settings().defaultActionMode || 'ask' };
       S.banner = null; S.git.st = null;
     }
-    renderSidebar(); renderMain(); if (settings().gitPanelOpen) loadGit();
+    renderSidebar(); renderMain(); if (settings().gitPanelOpen) loadGit(); if (S.filesOpen) { S.files = null; loadFiles(); }
     if (focusText) highlightText(focusText);
     if (isNew) memorySetupDialog(key, { isNew: true });
     else if (!quiet && data.record.memoryState === 'ask' && settings().askMemory !== false) askMemoryForExisting(key);
@@ -621,8 +622,9 @@ function renderMain() {
   $.status = h('div', { class: 'status-chip-wrap' });
   const head = h('div', { class: 'conv-head' }, showBtn,
     h('div', { class: 'conv-title' }, titleEl, loc), $.status,
-    ib('search', t('searchAll'), openSearch),
-    ib('eye', t('memoryWorkspace'), openMemoryWorkspace),
+    ib('file', t('files'), () => toggleFiles(), { class: S.filesOpen ? 'active' : '' }),
+    ib('search', t('searchAll'), () => openSearch()),
+    ib('eye', t('memoryWorkspace'), () => openMemoryWorkspace()),
     r.agent !== 'codex' ? h('span', { class: 'badge', html: icon('bot') + esc(S.sum.agents[r.agent]?.label || r.agent) }) : null,
     ib('edit', t('rename'), () => inlineRename(titleEl)),
     ib('more', '⋯', (e) => convMenu(e.currentTarget, { ...convByKey().get(S.conv.key), key: S.conv.key, title: r.title, cwd: r.cwd })));
@@ -653,6 +655,13 @@ function renderStatus() {
     use ? h('span', { class: 'badge', 'data-tip': t('tokens') }, `${fmtNum(use)} ${t('tokens')}`) : null);
 }
 const fmtNum = (u) => { const n = typeof u === 'number' ? u : u?.total?.totalTokens ?? u?.totalTokens ?? u?.total_tokens ?? u?.last?.totalTokens ?? null; return n == null ? '—' : n >= 1000 ? (n / 1000).toFixed(1) + 'k' : String(n); };
+
+/** Icon button showing the official tool icon when available (filled in asynchronously). */
+function tib(tool, tip, onclick) {
+  const b = ib(tool, tip, onclick);
+  toolIcon(tool).then((html) => { b.innerHTML = html; });
+  return b;
+}
 
 function inlineRename(titleEl) {
   const cur = S.conv.record.title;
@@ -685,9 +694,9 @@ function renderProject(hidden) {
     h('div', { class: 'conv-title' }, h('h1', {}, d?.name || P.folder.split(/[\\/]/).filter(Boolean).pop()), h('div', { class: 'loc' }, P.folder)),
     h('button', { class: 'btn primary', onclick: () => newConversation(P.folder), html: icon('chatPlus') + t('newChat') }),
     ib('folderOpen', t('openInExplorer'), () => api('/api/reveal', { path: P.folder }).catch(fail)),
-    S.sum.tools.vscode.enabled ? ib('vscode', 'VS Code', () => api('/api/tools/vscode', { folder: P.folder }).catch(fail)) : null,
-    S.sum.tools.matlab.enabled ? ib('matlab', 'MATLAB', () => api('/api/tools/matlab', { folder: P.folder }).then((r) => toast(`MATLAB ${r.release}`)).catch(fail)) : null,
-    S.sum.tools.git.enabled ? ib('branch', t('gitPanel'), () => toggleGit()) : null);
+    S.sum.tools.vscode.enabled ? tib('vscode', 'VS Code', () => api('/api/tools/vscode', { folder: P.folder }).catch(fail)) : null,
+    S.sum.tools.matlab.enabled ? tib('matlab', 'MATLAB', () => api('/api/tools/matlab', { folder: P.folder }).then((r) => toast(`MATLAB ${r.release}`)).catch(fail)) : null,
+    S.sum.tools.git.enabled ? tib('git', t('gitPanel'), () => toggleGit()) : null);
   const body = h('div', { class: 'stream' }, h('div', { class: 'hub' }));
   const grid = body.firstChild;
   if (P.error) grid.append(h('div', { class: 'errorbox' }, P.error));
@@ -803,7 +812,7 @@ function itemEl(it) {
     }
     case 'fileChange':
       el = h('details', { class: 'work', open: true },
-        h('summary', { html: icon('file') + `<span class="cmd">${esc(t('files'))} · ${it.changes.length}</span>${it.status === 'declined' ? `<span class="exit bad">${esc(t('decline'))}</span>` : it.status === 'failed' ? '<span class="exit bad">failed</span>' : ''}` }),
+        h('summary', { html: icon('file') + `<span class="cmd">${esc(t('filesChanged'))} · ${it.changes.length}</span>${it.status === 'declined' ? `<span class="exit bad">${esc(t('decline'))}</span>` : it.status === 'failed' ? '<span class="exit bad">failed</span>' : ''}` }),
         ...it.changes.map((c) => h('div', { class: 'filechg' },
           h('div', { class: 'fname', html: `<span class="kindtag ${esc(c.kind)}">${esc(c.kind)}</span><span>${esc(c.path)}${c.movePath ? ' → ' + esc(c.movePath) : ''}</span>` }),
           c.diff ? h('pre', { html: diffHtml(c.diff) }) : null)));
@@ -889,8 +898,17 @@ function renderComposer() {
   $.input = ta; setTimeout(autosize, 0);
 
   const models = modelsFor(r.agent);
-  const modelSel = h('select', { class: 'sel', 'data-tip': t('model'), 'data-tip-pos': 'up', onchange: (e) => { const m = models.find((x) => x.key === e.target.value); S.compose.modelKey = m.key; S.compose.effort = chooseEffort(m, S.compose.effort); patchSettings({ lastModelKey: m.key }); refreshEffort(); } },
-    ...models.map((m) => h('option', { value: m.key, selected: m.key === S.compose.modelKey }, m.label + (m.source === 'custom' && m.provider ? ` · ${m.provider}` : ''))));
+  const mark = (m) => (m.source === 'custom' ? ` · ${m.provider || 'TOML'}` : m.source === 'history' ? ` · ${t('usedBefore')}` : m.source === 'typed' ? ` · ${t('typedByYou')}` : '');
+  const modelSel = h('select', { class: 'sel', 'data-tip': `${t('model')} — ${t('modelsFromAccount')}`, 'data-tip-pos': 'up', onchange: async (e) => {
+    if (e.target.value === '__refresh') {
+      e.target.disabled = true;
+      try { const r = await api('/api/models/refresh', { agent: S.conv.record.agent }); S.sum.models = r.models; const res = r.results[S.conv.record.agent]; toast(res?.ok ? t('modelsFound', { n: res.count }) : res?.error || '—', !res?.ok); } catch (err) { fail(err); }
+      renderMain(); return;
+    }
+    const m = models.find((x) => x.key === e.target.value); S.compose.modelKey = m.key; S.compose.effort = chooseEffort(m, S.compose.effort); patchSettings({ lastModelKey: m.key }); refreshEffort();
+  } },
+    ...models.map((m) => h('option', { value: m.key, selected: m.key === S.compose.modelKey }, (m.isDefault ? '★ ' : '') + m.label + mark(m))),
+    h('option', { value: '__refresh' }, `↻ ${t('detectModels')}`));
   const effortSel = h('select', { class: 'sel', 'data-tip': t('effort'), 'data-tip-pos': 'up', onchange: (e) => { S.compose.effort = e.target.value; const m = models.find((x) => x.key === S.compose.modelKey); if (m) patchSettings({ modelEfforts: { ...(settings().modelEfforts || {}), [m.key]: e.target.value } }); } });
   const refreshEffort = () => {
     const m = models.find((x) => x.key === S.compose.modelKey);
@@ -1067,7 +1085,7 @@ async function openLinkDialog() {
 // ------------------------------------------------------------------ git
 function gitTarget() { return S.conv ? { key: S.conv.key } : S.selFolder ? { folder: S.selFolder } : null; }
 function toggleGit() { if (settings().gitPanelOpen) { patchSettings({ gitPanelOpen: false }); $.gitp.classList.add('hidden'); } else openGit(); }
-function openGit() { patchSettings({ gitPanelOpen: true }); $.gitp.classList.remove('hidden'); loadGit(); }
+function openGit() { if (S.filesOpen) { S.filesOpen = false; $.filesp.classList.add('hidden'); } patchSettings({ gitPanelOpen: true }); $.gitp.classList.remove('hidden'); loadGit(); }
 async function loadGit() {
   const tgt = gitTarget();
   if (!tgt) { renderGit(); return; }
@@ -1170,6 +1188,56 @@ function renderGit() {
 async function showDiff(f) {
   const tgt = gitTarget();
   try { const r = await api('/api/git/diff', { ...tgt, file: f.path, staged: f.staged && f.worktree === '.' }); modal({ title: f.path, cls: 'wide', body: h('pre', { class: 'codeblock', html: diffHtml(r.diff || '(no textual diff — new or binary file)') }) }); } catch (e) { fail(e); }
+}
+
+// ------------------------------------------------------------------ files of the conversation
+function toggleFiles() {
+  S.filesOpen = !S.filesOpen;
+  if (S.filesOpen && settings().gitPanelOpen) { patchSettings({ gitPanelOpen: false }); $.gitp.classList.add('hidden'); }
+  $.filesp.classList.toggle('hidden', !S.filesOpen);
+  if (S.filesOpen) loadFiles();
+  renderMain();
+}
+async function loadFiles() {
+  if (!S.conv) { S.files = null; return renderFilesPanel(); }
+  const key = S.conv.key;
+  try { const r = await api('/api/conversation/files' + q({ key })); if (S.conv?.key === key) S.files = r; } catch (e) { S.files = { error: e.message }; }
+  renderFilesPanel();
+}
+function renderFilesPanel() {
+  $.filesp.classList.toggle('hidden', !S.filesOpen);
+  if (!S.filesOpen) return;
+  const F = S.files, cwd = F?.cwd || S.conv?.record?.cwd || '';
+  const rel = (p) => (cwd && p.toLowerCase().startsWith(cwd.toLowerCase()) ? p.slice(cwd.length).replace(/^[\\/]/, '') : p);
+  const row = (f, sub, extra) => h('button', { class: 'li hub-link', title: f.path, onclick: () => previewConvFile(f) },
+    h('span', { html: icon(f.exists === false ? 'warn' : 'file') }), h('div', { class: 'grow' }, h('div', { class: 'fp-name' }, f.label || rel(f.path)), h('div', { class: 'sub' }, sub)), extra || null);
+  const section = (title, list, render) => [h('div', { class: 'gp-section' }, `${title} (${list.length})`), list.length ? h('div', { class: 'list' }, ...list.map(render)) : h('div', { class: 'help' }, '—')];
+  const body = h('div', { class: 'gp-body' });
+  if (!F) body.append(h('div', { class: 'help' }, '…'));
+  else if (F.error) body.append(h('div', { class: 'errorbox' }, F.error));
+  else body.append(
+    ...section(t('filesChanged'), F.changed, (f) => row(f, `${f.kinds.join(', ')} · ${f.edits}× ${f.exists === false ? '· ' + t('fileMissing') : ''}`, h('span', { class: 'badge' }, f.kinds.includes('add') ? 'A' : f.kinds.includes('delete') ? 'D' : 'M'))),
+    ...section(t('filesRead'), F.read, (f) => row(f, `${f.times}× ${f.exists === false ? '· ' + t('fileMissing') : ''}`)),
+    ...section(t('attachments'), F.attachments, (f) => row({ ...f, label: f.name }, fmtTime(f.at))),
+    ...section(t('memoryFiles'), F.memory, (f) => row(f, fmtTime(f.mtime))),
+    h('button', { class: 'btn', onclick: () => openProject(cwd), html: icon('folder') + t('browseFolder') }));
+  $.filesp.replaceChildren(h('div', { class: 'gp-head' }, h('h3', { html: icon('file') + esc(t('files')) }), ib('refresh', t('refresh'), loadFiles), ib('close', t('close'), toggleFiles)), body);
+}
+async function previewConvFile(f) {
+  let r;
+  try { r = await api('/api/conversation/file' + q({ key: S.conv.key, file: f.path })); } catch (e) { fail(e); return; }
+  const ext = (f.path.split('.').pop() || '').toLowerCase();
+  const content = r.text != null ? (ext === 'md' ? h('div', { class: 'msg-agent', style: { padding: '4px 2px' }, html: renderMarkdown(r.text) }) : h('pre', { class: 'codeblock', html: highlightCode(r.text.slice(0, 200000), ext) })) : h('p', { class: 'help' }, r.binary ? t('binaryFile') : t('tooLargeFile'));
+  const tabs = h('div', { class: 'inline' });
+  const area = h('div', {}, content);
+  if (f.lastDiff) {
+    tabs.append(h('button', { class: 'btn small', onclick: () => area.replaceChildren(content) }, t('preview')), h('button', { class: 'btn small', onclick: () => area.replaceChildren(h('pre', { class: 'codeblock', html: diffHtml(f.lastDiff) })) }, t('changesHere')));
+  }
+  const isMem = /(CONTEXT|INSTRUCTIONS)\.md$/.test(f.path);
+  modal({ title: f.label || f.path.split(/[\\/]/).pop(), cls: 'wide', body: h('div', {}, h('div', { class: 'help' }, f.path), tabs, area),
+    foot: [isMem ? h('button', { class: 'btn', onclick: () => openMemoryEditor(f.path, f.label || f.path) }, t('edit')) : null,
+      S.sum.tools.vscode.enabled ? h('button', { class: 'btn', onclick: () => api('/api/tools/vscode', { key: S.conv.key, file: f.path }).catch(fail) }, 'VS Code') : null,
+      h('button', { class: 'btn', onclick: () => api('/api/reveal', { path: f.path }).catch(fail) }, t('openInExplorer'))].filter(Boolean) });
 }
 
 // ------------------------------------------------------------------ Jira
@@ -1398,6 +1466,7 @@ const SETTINGS = {
       field(t('theme'), select([['system', t('system')], ['light', t('light')], ['dark', t('dark')]], settings().theme || 'system', (v) => { patchSettings({ theme: v }, true); applyTheme(); renderTop(); })),
       field(t('uiMode'), select([['simple', t('simpleMode')], ['pro', t('proMode')]], settings().uiMode || 'simple', (v) => { patchSettings({ uiMode: v }, true); document.body.classList.toggle('mode-simple', v === 'simple'); renderAll(); }), t('simpleHelp')),
       h('h3', { style: { marginTop: '18px' } }, t('officialIcons')), h('p', { class: 'help' }, t('fetchIconsHelp')),
+      checkbox(t('autoIcons'), settings().autoIcons !== false, (v) => patchSettings({ autoIcons: v }, true)),
       h('button', { class: 'btn primary', html: icon('download') + t('fetchIcons'), onclick: async (e) => {
         e.currentTarget.disabled = true; out.textContent = '…';
         try { const r = await api('/api/icons/fetch', {}); S.sum.icons = r.icons; setLogos(S.sum.logos, S.sum.icons, TOKEN); renderTop(); out.textContent = r.results.map((x) => `${x.ok ? '✓' : '✕'} ${x.tool}${x.ok ? '' : ' — ' + x.error}`).join('   '); setTimeout(() => openSettings('appearance'), 1500); }
@@ -1655,6 +1724,8 @@ function onEvent(e) {
     case 'server.shutdown': showClosed(); break;
     case 'job.update': { S.jobs = [...(S.jobs || []).filter((j) => j.id !== e.job.id), e.job]; S.onJobs?.(); if (e.job.status !== 'running') { toast(`${e.job.title}: ${e.job.status}`, e.job.status === 'failed'); S.addonsRefresh?.(); loadState(false); } break; }
     case 'addons.changed': S.addonsRefresh?.(); break;
+    case 'icons.updated': S.sum.icons = e.icons; setLogos(S.sum.logos, S.sum.icons, TOKEN); renderTop(); if (S.conv || S.project) renderMain(); break;
+    case 'files.changed': if (isActive && S.filesOpen) loadFiles(); break;
     default: break;
   }
 }

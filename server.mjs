@@ -80,6 +80,7 @@ export async function createServer({ dataDir = defaultDataDir(), codexHome, port
     'POST /api/models/import': (b) => app.importModelProfile(b),
     'POST /api/models/remove': (b) => app.removeModel(b.key),
     'POST /api/models/restore': () => app.restoreAgentModels(),
+    'POST /api/models/refresh': (b) => app.refreshModels(b.agent),
     'GET /api/config': () => app.configSummary(),
     'POST /api/config/load': (b) => app.loadConfigToml(b.text),
     'GET /api/secrets': () => app.listSecrets(),
@@ -109,6 +110,8 @@ export async function createServer({ dataDir = defaultDataDir(), codexHome, port
     'GET /api/project/files': (q) => app.listFiles(q.folder, q.sub),
     'GET /api/project/file': (q) => app.readProjectFile(q.folder, q.file),
     'POST /api/attachments': (b) => app.saveAttachment(b),
+    'GET /api/conversation/files': (q) => app.conversationFiles(q.key),
+    'GET /api/conversation/file': (q) => app.conversationFile(q.key, q.file),
   };
 
   const server = http.createServer(async (req, res) => {

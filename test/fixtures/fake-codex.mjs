@@ -51,7 +51,7 @@ async function runTurn(threadId, params) {
   t.lastTurnParams = { cwd: params.cwd, model: params.model, effort: params.effort, approvalPolicy: params.approvalPolicy, sandboxPolicy: params.sandboxPolicy, text: full };
   if (/crash/.test(text)) { process.exit(3); }
   if (/run/.test(text)) {
-    const cmd = { type: 'commandExecution', id: crypto.randomUUID(), command: 'echo hello', cwd: params.cwd || t.cwd, status: 'inProgress', commandActions: [], aggregatedOutput: null, exitCode: null, durationMs: null, source: 'agent', processId: null, pluginId: null, scriptPath: null };
+    const cmd = { type: 'commandExecution', id: crypto.randomUUID(), command: 'echo hello', cwd: params.cwd || t.cwd, status: 'inProgress', commandActions: [{ type: 'read', command: 'cat notes.md', name: 'notes.md', path: 'notes.md' }], aggregatedOutput: null, exitCode: null, durationMs: null, source: 'agent', processId: null, pluginId: null, scriptPath: null };
     notify('item/started', { threadId, turnId, item: cmd, startedAtMs: Date.now() });
     const r = await ask('item/commandExecution/requestApproval', { kind: 'command', threadId, turnId, itemId: cmd.id, startedAtMs: Date.now(), command: 'echo hello', cwd: cmd.cwd, reason: 'test' });
     const ok = r.decision === 'accept' || r.decision === 'acceptForSession';

@@ -13,6 +13,7 @@ fs.mkdirSync(codexHome, { recursive: true }); fs.mkdirSync(work, { recursive: tr
 process.env.CPM_CODEX_BIN = path.join(here, 'fixtures', 'fake-codex.mjs');
 process.env.CPM_CLAUDE_BIN = path.join(root, 'no-claude');
 process.env.CPM_NO_EXIT = '1';
+process.env.CPM_NO_AUTO_ICONS = '1';
 const { createServer } = await import('../server.mjs');
 
 let srv, base, events = [];

@@ -19,16 +19,19 @@ export function highlightCode(code, lang = '') {
   if (['sh', 'bash', 'console', 'shell', 'powershell', 'ps1', 'cmd'].includes(l)) {
     return code.split('\n').map((line) => /^(\$|>|PS [^>]*>)\s?/.test(line) ? `<span class="tk-prompt">${esc(line)}</span>` : esc(line)).join('\n');
   }
-  // Generic: strings, comments, numbers and keywords (works acceptably for JS, Python, MATLAB, TOML, JSON).
-  const KW = /\b(function|end|if|else|elseif|for|while|return|const|let|var|def|class|import|from|export|async|await|try|catch|switch|case|break|continue|true|false|null|None|True|False|new|in|of)\b/g;
-  return esc(code).split('\n').map((line) => {
-    const m = /(^|\s)(%|#|\/\/)(?![{!]).*$/.exec(line);
-    let head = m ? line.slice(0, m.index + m[1].length) : line;
-    const tail = m ? line.slice(m.index + m[1].length) : '';
-    head = head.replace(/(&quot;.*?&quot;|&#39;.*?&#39;)/g, '<span class="tk-str">$1</span>')
-      .replace(/\b(\d+(\.\d+)?)\b/g, '<span class="tk-num">$1</span>')
-      .replace(KW, '<span class="tk-kw">$1</span>');
-    return head + (tail ? `<span class="tk-com">${tail}</span>` : '');
+  // Generic single-pass tokenizer (strings, comments, numbers, keywords) — works acceptably for JS, Python,
+  // MATLAB, TOML and JSON. Tokens are matched on the raw text and escaped individually, so inserted markup
+  // can never be re-matched (a keyword pass once broke on the word "class" inside its own <span class>).
+  const TOKEN = /("(?:[^"\\]|\\.)*"|'(?:[^'\\\n]|\\.)*')|((?:^|(?<=\s))(?:%|#|\/\/)(?![{!]).*$)|\b(\d+(?:\.\d+)?)\b|\b(function|end|if|else|elseif|for|while|return|const|let|var|def|class|import|from|export|async|await|try|catch|switch|case|break|continue|true|false|null|None|True|False|new|in|of)\b/gm;
+  return String(code).split('\n').map((line) => {
+    let out = '', last = 0;
+    for (const m of line.matchAll(TOKEN)) {
+      out += esc(line.slice(last, m.index));
+      const cls = m[1] ? 'tk-str' : m[2] ? 'tk-com' : m[3] ? 'tk-num' : 'tk-kw';
+      out += `<span class="${cls}">${esc(m[0])}</span>`;
+      last = m.index + m[0].length;
+    }
+    return out + esc(line.slice(last));
   }).join('\n');
 }
 

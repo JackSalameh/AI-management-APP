@@ -6,7 +6,8 @@ import os from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
 import { fileURLToPath } from 'node:url';
-import { pickIconLinks } from '../lib/icons.mjs';
+import { pickIconLinks, downloadIcon } from '../lib/icons.mjs';
+import { effortsFor } from '../lib/agents/api.mjs';
 import { normalizeProvider } from '../lib/providers.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -19,6 +20,7 @@ process.env.CLAUDE_CONFIG_DIR = path.join(root, 'claude');
 process.env.FAKE_NPM_LOG = path.join(root, 'npm.log');
 process.env.PATH = `${path.join(here, 'fixtures', 'bin')}${path.delimiter}${process.env.PATH}`;
 process.env.CPM_NO_EXIT = '1';
+process.env.CPM_NO_AUTO_ICONS = '1';
 const { createServer } = await import('../server.mjs');
 
 // ---- stub provider endpoints (OpenAI-compatible, Anthropic, Gemini), recording requests
@@ -228,4 +230,54 @@ test('closing the window stops the agents and exits (auto-quit)', async () => {
   assert.equal(s2.app.agents.codex.state, 'stopped', 'agent connection closed');
   await assert.rejects(fetch(`http://127.0.0.1:${s2.port}/api/health`, { headers: { 'x-cpm-token': s2.token } }), 'server exited');
   delete process.env.CPM_AUTOQUIT_MS;
+});
+
+test('conversation files: changed, read, attached and memory files; preview limited to the conversation', async () => {
+  const folder = path.join(work, 'FilesConv');
+  fs.mkdirSync(folder, { recursive: true });
+  fs.writeFileSync(path.join(folder, 'notes.md'), '# notes');
+  fs.writeFileSync(path.join(folder, 'a.txt'), 'hi');
+  const n = await api('/api/conversation/new', { folder });
+  await api('/api/conversation/memory-setup', { key: n.key, enable: true, context: 'ctx' });
+  const att = await api('/api/attachments', { key: n.key, name: 'data.csv', data: Buffer.from('x,y\n1,2').toString('base64') });
+  events = [];
+  await api('/api/conversation/send', { key: n.key, text: 'please run and edit', attachments: [att] });
+  for (const kind of ['command', 'fileChange']) { const r = await waitFor((e) => e.type === 'approval.request' && e.kind === kind && e.key === n.key); await api('/api/conversation/approve', { key: n.key, requestKey: r.requestKey, decision: 'accept' }); }
+  await waitFor((e) => e.type === 'turn.completed' && e.key === n.key);
+  await new Promise((r) => setTimeout(r, 200));
+  const f = await api(`/api/conversation/files?key=${encodeURIComponent(n.key)}`);
+  assert.deepEqual(f.changed.map((x) => x.path), [path.join(folder, 'a.txt')]);
+  assert.ok(f.changed[0].lastDiff.includes('+hi'));
+  assert.deepEqual(f.read.map((x) => x.path), [path.join(folder, 'notes.md')]);
+  assert.equal(f.attachments[0].name, 'data.csv');
+  assert.ok(f.memory.some((m) => m.label === 'CONTEXT.md'));
+  assert.equal((await api(`/api/conversation/file?key=${encodeURIComponent(n.key)}&file=${encodeURIComponent(path.join(folder, 'notes.md'))}`)).text, '# notes');
+  assert.equal((await api(`/api/conversation/file?key=${encodeURIComponent(n.key)}&file=${encodeURIComponent(att.path)}`)).text, 'x,y\n1,2');
+  assert.equal((await api(`/api/conversation/file?key=${encodeURIComponent(n.key)}&file=${encodeURIComponent('/etc/hostname')}`)).status, 403);
+});
+
+test('models: refresh asks each account; reasoning levels from provider metadata', async () => {
+  const r = await api('/api/models/refresh', {});
+  assert.equal(r.results.codex.ok, true);
+  assert.deepEqual(r.models.find((m) => m.key === 'codex:gpt-5.5').efforts, ['low', 'medium', 'high', 'xhigh'], 'efforts reported by the Codex account');
+  assert.deepEqual(effortsFor({ kind: 'openai' }, { id: 'anthropic/claude-x', params: ['tools', 'reasoning'] }), ['low', 'medium', 'high'], 'OpenRouter metadata');
+  assert.deepEqual(effortsFor({ kind: 'openai' }, { id: 'meta/llama', params: ['tools'] }), []);
+  assert.deepEqual(effortsFor({ kind: 'gemini' }, { id: 'gemini-x', thinking: true }), ['low', 'medium', 'high']);
+  assert.deepEqual(effortsFor({ kind: 'openai' }, { id: 'gpt-5-mini' }), ['minimal', 'low', 'medium', 'high']);
+  assert.deepEqual(effortsFor({ kind: 'openai' }, { id: 'gpt-4o' }), []);
+  assert.deepEqual(effortsFor({ kind: 'anthropic' }, { id: 'claude-sonnet-4-6' }), ['low', 'medium', 'high']);
+});
+
+test('official icon download prefers the page icon (SVG) and saves it locally', async () => {
+  const site = http.createServer((req, res) => {
+    if (req.url === '/') { res.setHeader('content-type', 'text/html'); return res.end('<html><head><link rel="icon" href="/fav.png" sizes="32x32"><link rel="icon" type="image/svg+xml" href="/logo.svg"></head></html>'); }
+    if (req.url === '/logo.svg') { res.setHeader('content-type', 'image/svg+xml'); return res.end('<svg xmlns="http://www.w3.org/2000/svg"/>'); }
+    res.writeHead(404); res.end();
+  });
+  await new Promise((r) => site.listen(0, '127.0.0.1', r));
+  const dir = path.join(root, 'icons-test');
+  const r = await downloadIcon('jira', dir, { page: `http://127.0.0.1:${site.address().port}/` });
+  assert.equal(r.file, 'jira.svg');
+  assert.ok(fs.readFileSync(path.join(dir, 'jira.svg'), 'utf8').startsWith('<svg'));
+  site.close();
 });

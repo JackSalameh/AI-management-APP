@@ -42,8 +42,8 @@ a { color: var(--accent); }
 .brand small { color: var(--faint); font-weight: 500; font-size: 11px; }
 .topbar .spacer { flex: 1; }
 .sep { width: 1px; height: 22px; background: var(--line); margin: 0 4px; }
-.body { display: grid; grid-template-columns: var(--side-w, 300px) 1fr auto; min-height: 0; }
-.body.side-hidden { grid-template-columns: 0 1fr auto; }
+.body { display: grid; grid-template-columns: var(--side-w, 300px) 1fr auto auto; min-height: 0; }
+.body.side-hidden { grid-template-columns: 0 1fr auto auto; }
 .body.side-hidden .sidebar { visibility: hidden; }
 
 /* ---------- buttons ---------- */
@@ -344,3 +344,6 @@ body.mode-simple .pro-only { display: none !important; }
 .ic.rot180 { transform: rotate(180deg); }
 .jobs { display: flex; flex-direction: column; gap: 6px; }
 .dialog .settings section .cards { grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); }
+
+.filespanel .li .fp-name { font-family: var(--mono); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: left; }
+.filespanel .list { max-height: none; }

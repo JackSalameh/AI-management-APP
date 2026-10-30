@@ -54,6 +54,12 @@ A local desktop web app that replaces the Codex command window: projects as an E
 - Official logos are never bundled or drawn: downloaded from vendor sites to the user's data folder on request, or uploaded.
 - Closing the app window quits after 20 s without a window (reloads reconnect in time); ⏻ quits immediately.
 
+## Decisions added in 3.1
+- Official icons are fetched automatically on the user's computer (never bundled): ICON_DIRECT official files first (code.visualstudio.com/assets/branding/code-stable.png; git-scm.com Git-Icon-1788C), then the vendor page's icon links. VS Code brand rules allow referring to VS Code, not identifying/promoting your own product — check every vendor's rules before a commercial or store release.
+- Claude Code has no model-list command (2.1.314): models = aliases + settings default + Anthropic /v1/models (if key) + models seen in sessions; efforts parsed from `claude --help`.
+- Conversation Files panel derives files from the transcript (fileChange items, Codex commandActions reads, Claude Read tool) plus recorded attachments and memory files; previews limited to the conversation folder or those files.
+
 ## Progress
+- 2026-10-30: 3.1.0 — 55 automated tests, 36 browser flows (4 suites), Claude detection checked on a real install.
 - 2026-10-30: 3.0.0 — 50 automated tests, 32 browser flows (3 suites), real codex-cli 0.166.0 smoke test.
 - 2026-10-30: rebuild completed as 2.0.0 in a cloud workspace (not deployed). Validation: 40 automated tests, 23 browser flows, smoke test against real codex-cli 0.166.0 (no account), Claude adapter read of a real session. Not verified: Windows-only paths (DPAPI, .vbs, Edge app window, MATLAB launch), real Jira/Bitbucket accounts, paid model replies. See CHANGELOG.md.
