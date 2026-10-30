@@ -64,23 +64,35 @@ test('connect OmniRoute to Claude Code: switch, test, models, environment of eac
   assert.deepEqual(g.models.sort(), ['glm/glm-5.2', 'kmc/kimi-k2.6']);
   assert.equal(seen.at(-1).auth, 'Bearer oma_test_key');
 
-  // No Claude sign-in needed; the key never appears in the state file or the settings.
-  const acc = await api('/api/agent/account?agent=claude');
-  assert.equal(acc.loggedIn, true); assert.equal(acc.method, 'gateway');
+  // Claude's own models and OmniRoute's are offered together, in two groups; the key never appears in the state file.
+  const st = await api('/api/state');
+  const claudeModels = st.models.filter((m) => m.agent === 'claude');
+  assert.ok(claudeModels.some((m) => m.model === 'opus' && !m.gateway), 'Claude models kept');
+  assert.deepEqual(claudeModels.filter((m) => m.gateway).map((m) => [m.key, m.model]).sort(), [['claude:gateway:glm/glm-5.2', 'glm/glm-5.2'], ['claude:gateway:kmc/kimi-k2.6', 'kmc/kimi-k2.6']]);
   await srv.app.store.flush();
   const state = fs.readFileSync(path.join(dataDir, 'state.json'), 'utf8');
   assert.ok(!state.includes('oma_test_key'), 'key kept as a secret only');
 
   // A turn: Claude Code receives the gateway variables in its environment, and the model chosen beside Send.
-  const n = await api('/api/conversation/new', { agent: 'claude', folder: path.join(work, 'GW'), modelKey: 'claude:kmc/kimi-k2.6' });
+  const n = await api('/api/conversation/new', { agent: 'claude', folder: path.join(work, 'GW'), modelKey: 'claude:gateway:kmc/kimi-k2.6' });
   assert.equal(n.status, 200, n.error);
   events = [];
-  const s = await api('/api/conversation/send', { key: n.key, text: 'hello gateway', modelKey: 'claude:kmc/kimi-k2.6' });
+  const s = await api('/api/conversation/send', { key: n.key, text: 'hello gateway', modelKey: 'claude:gateway:kmc/kimi-k2.6' });
   assert.equal(s.status, 200, s.error);
   const done = await waitFor((e) => e.type === 'turn.completed' && e.key === n.key);
   assert.equal(done.status, 'completed', done.error);
   const reply = events.find((e) => e.type === 'item.completed' && e.key === n.key && e.item.kind === 'agent').item.text;
   assert.match(reply, new RegExp(`BASE=${OMNI} TOKEN=oma_test_key MODEL=glm/glm-5.2 ARG=kmc/kimi-k2.6 DISCOVERY=1 IN=hello gateway`));
+  // The model that answered is reported (shown with a ✓ beside the composer).
+  const ack = events.find((e) => e.type === 'turn.ack' && e.key === n.key && e.confirmed);
+  assert.equal(ack.model, 'kmc/kimi-k2.6');
+
+  // Same conversation, a Claude model: this turn goes to Anthropic (your Claude account), with the effort.
+  events = [];
+  await api('/api/conversation/send', { key: n.key, text: 'claude now', modelKey: 'claude:opus', effort: 'high' });
+  await waitFor((e) => e.type === 'turn.completed' && e.key === n.key);
+  const replyC = events.find((e) => e.type === 'item.completed' && e.key === n.key && e.item.kind === 'agent').item.text;
+  assert.ok(!replyC.includes(OMNI) && replyC.includes('TOKEN=- ') && replyC.includes('ARG=opus'), replyC);
 
   // Off: the next turn goes to Anthropic again (no gateway variables).
   const off = await api('/api/claude/gateway', { enabled: false });

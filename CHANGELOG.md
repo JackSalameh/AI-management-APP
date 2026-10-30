@@ -10,6 +10,14 @@
   else and no file would be overwritten. Sessions found on disk, Git repositories, drive roots and your home
   folder still use `<sessions folder>\<title>`, so nothing is written into existing projects.
 
+- **The conversation's model was not shown, and not every model could be chosen**: opening a conversation selected
+  the default model instead of the one the conversation uses (e.g. Claude Opus 5.5 recorded in a Claude Code
+  session). The picker now selects the conversation's own model (added to the list if the AI no longer lists it),
+  and a badge beside the title shows the model and reasoning level for the next message, then the model that
+  actually answered (✓). With OmniRoute connected, the picker lists **your account's models and OmniRoute's
+  together**, in two groups; each message goes through OmniRoute only when an OmniRoute model is chosen, otherwise
+  to Anthropic with your Claude account (both can be used in the same conversation).
+
 ### New
 - **Every Claude Code and Codex session on the computer is found and loaded.** The app searches Codex's folder
   (`%USERPROFILE%\.codex\sessions` and `archived_sessions`), Claude Code's folder (`%USERPROFILE%\.claude\projects`),

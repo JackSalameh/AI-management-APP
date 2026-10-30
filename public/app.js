@@ -484,6 +484,32 @@ function defaultModelFor(agent, prefer) {
   const list = modelsFor(agent);
   return list.find((m) => m.key === prefer) || list.find((m) => m.key === settings().lastModelKey) || list.find((m) => m.isDefault) || list[0] || null;
 }
+/**
+ * The model this conversation uses: the one chosen in the app, else the one the AI recorded in the conversation
+ * (Codex thread, Claude Code transcript), else the default. A recorded model missing from the list is added to it,
+ * so the picker always shows what the conversation really uses.
+ */
+function modelOfConversation(r) {
+  const list = modelsFor(r.agent);
+  const byKey = r.modelKey && list.find((m) => m.key === r.modelKey);
+  if (byKey) return byKey;
+  if (r.model) {
+    const found = list.find((m) => m.model === r.model && !m.gateway) || list.find((m) => m.model === r.model);
+    if (found) return found;
+    const extra = { key: `${r.agent}:${r.model}`, agent: r.agent, id: r.model, model: r.model, label: modelLabel(r.model), efforts: list[0]?.efforts || [], source: 'history' };
+    S.sum.models = [...(S.sum.models || []), extra];
+    return extra;
+  }
+  return defaultModelFor(r.agent);
+}
+/** A readable name for a model id (claude-opus-5-5 → Claude Opus 5.5); the label from the model list when known. */
+function modelLabel(id) {
+  if (!id) return '';
+  const known = (S.sum.models || []).find((m) => m.model === id && m.label && m.label !== id && !m.gateway);
+  if (known) return known.label.replace(/ \(.*\)$/, '');
+  const c = /^claude-([a-z]+)-(\d+)(?:-(\d{1,2}))?(?:-\d{8})?$/.exec(id);
+  return c ? `Claude ${c[1][0].toUpperCase()}${c[1].slice(1)} ${c[2]}${c[3] ? '.' + c[3] : ''}` : id;
+}
 function chooseEffort(model, prefer) {
   if (!model) return prefer || null;
   const list = model.efforts?.length ? model.efforts : ['low', 'medium', 'high'];
@@ -502,13 +528,13 @@ async function openConversation(key, { quiet = false, limit, isNew = false, focu
     if (!data.draft) S.conv.draft = store.get('draft.' + key, '');
     S.selFolder = data.record.cwd;
     if (!keepCompose) {
-      const m = defaultModelFor(data.record.agent, data.record.modelKey);
+      const m = modelOfConversation(data.record);
       S.compose = { modelKey: m?.key || null, effort: chooseEffort(m, data.record.effort), mode: data.record.actionMode || settings().defaultActionMode || 'ask' };
       S.banner = null; S.git.st = null;
     }
     renderSidebar(); renderMain(); if (settings().gitPanelOpen) loadGit(); if (S.filesOpen) { S.files = null; loadFiles(); }
     const ag = data.record.agent;
-    if (ag === 'codex' || ag === 'claude') loadAccount(ag).then((acc) => { if (acc && acc.installed !== false && !acc.loggedIn && S.conv?.key === key) { S.banner = signInBanner(ag); renderMain(); } });
+    if (ag === 'codex' || ag === 'claude') loadAccount(ag).then((acc) => { if (acc && acc.installed !== false && !acc.loggedIn && S.conv?.key === key && !modelsFor(ag).find((m) => m.key === S.compose?.modelKey)?.gateway) { S.banner = signInBanner(ag); renderMain(); } });
     if (focusText) highlightText(focusText);
     if (isNew) memorySetupDialog(key, { isNew: true });
     else if (!quiet && data.record.memoryState === 'ask' && settings().askMemory !== false) askMemoryForExisting(key);
@@ -685,6 +711,14 @@ function currentPhase() {
   if (S.conv.running) return S.phase[S.conv.key] === 'queued' ? 'queued' : 'running';
   return S.phase[S.conv.key] || null;
 }
+/** Models in groups: the AI's own (your account) first, then each gateway (e.g. OmniRoute). One group: no heading. */
+function modelGroups(models) {
+  const groups = new Map();
+  for (const m of models) { const g = m.gateway ? m.provider || 'Gateway' : ''; if (!groups.has(g)) groups.set(g, []); groups.get(g).push(m); }
+  if (groups.size === 1) return [['', models]];
+  return [...groups.entries()].map(([g, ms]) => [g || t('ownModels'), ms]);
+}
+
 function renderStatus() {
   if (!$.status || !S.conv) return;
   const ph = currentPhase();
@@ -693,7 +727,8 @@ function renderStatus() {
   const tip = ack ? `${t('ackLabel')}: ${ack.model || '?'}${ack.effort ? ' · ' + effortLabel(ack.effort) : ''}${ack.provider ? ' · ' + ack.provider : ''}` : '';
   $.status.replaceChildren(
     ph ? h('span', { class: `agent-pill status-${ph}`, 'data-tip': tip || t('status.' + ph) }, h('span', { class: `dot ${cls}` }), t('status.' + ph)) : null,
-    ack ? h('span', { class: `badge ${ack.mismatch ? 'warn' : ack.confirmed ? 'ok' : ''}`, 'data-tip': ack.mismatch ? t('effortMismatch', { wanted: effortLabel(ack.wanted), used: effortLabel(ack.effort) }) : `${tip} · ${ack.confirmed ? t('ackConfirmed') : t('ackRequested')}` }, `${ack.model || ''}${ack.effort ? ' · ' + effortLabel(ack.effort) : ''}${ack.confirmed && !ack.mismatch ? ' ✓' : ''}`) : null,
+    !ack && S.compose?.modelKey ? (() => { const m = modelsFor(S.conv.record.agent).find((x) => x.key === S.compose.modelKey); return m ? h('span', { class: 'badge', 'data-tip': t('modelInUse') }, `${m.label.replace(/ \(.*\)$/, '')}${S.compose.effort && m.efforts?.length ? ' · ' + effortLabel(S.compose.effort) : ''}`) : null; })() : null,
+    ack ? h('span', { class: `badge ${ack.mismatch ? 'warn' : ack.confirmed ? 'ok' : ''}`, 'data-tip': ack.mismatch ? t('effortMismatch', { wanted: effortLabel(ack.wanted), used: effortLabel(ack.effort) }) : `${tip} · ${ack.confirmed ? t('ackConfirmed') : t('ackRequested')}` }, `${modelLabel(ack.model)}${ack.effort ? ' · ' + effortLabel(ack.effort) : ''}${ack.confirmed && !ack.mismatch ? ' ✓' : ''}`) : null,
     ...usageBadges(use));
 }
 
@@ -1008,6 +1043,7 @@ function renderComposer() {
   $.input = ta; setTimeout(autosize, 0);
 
   const models = modelsFor(r.agent);
+  if (!models.some((m) => m.key === S.compose.modelKey)) { const cm = modelOfConversation(r); if (cm) { if (!models.includes(cm)) models.push(cm); S.compose.modelKey = cm.key; } }
   const mark = (m) => (m.source === 'custom' ? ` · ${m.provider || 'TOML'}` : m.source === 'history' ? ` · ${t('usedBefore')}` : m.source === 'typed' ? ` · ${t('typedByYou')}` : '');
   const modelSel = h('select', { class: 'sel', 'data-tip': `${t('model')} — ${t('modelsFromAccount')}`, 'data-tip-pos': 'up', onchange: async (e) => {
     if (e.target.value === '__refresh') {
@@ -1018,7 +1054,10 @@ function renderComposer() {
     const m = models.find((x) => x.key === e.target.value); S.compose.modelKey = m.key; S.compose.effort = chooseEffort(m, S.compose.effort); patchSettings({ lastModelKey: m.key }); refreshEffort();
     saveComposeChoice();
   } },
-    ...models.map((m) => h('option', { value: m.key, selected: m.key === S.compose.modelKey }, (m.isDefault ? '★ ' : '') + m.label + mark(m))),
+    ...modelGroups(models).map(([label, ms]) => {
+      const opts = ms.map((m) => h('option', { value: m.key, selected: m.key === S.compose.modelKey }, (m.isDefault ? '★ ' : '') + m.label + mark(m)));
+      return label ? h('optgroup', { label }, ...opts) : opts;
+    }).flat(),
     h('option', { value: '__refresh' }, `↻ ${t('detectModels')}`));
   const effortSel = h('select', { class: 'sel', 'data-tip': t('effort'), 'data-tip-pos': 'up', onchange: (e) => { S.compose.effort = e.target.value; const m = models.find((x) => x.key === S.compose.modelKey); if (m) patchSettings({ modelEfforts: { ...(settings().modelEfforts || {}), [m.key]: e.target.value } }); saveComposeChoice(); } });
   const refreshEffort = () => {
