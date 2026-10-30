@@ -394,3 +394,4 @@ body.mode-simple .pro-only { display: none !important; }
 .usage[data-tip]:hover::after { white-space: pre; text-align: left; left: auto; right: 0; transform: none; }
 
 .acct { margin: 6px 0 4px; } .acct-line { display: flex; align-items: center; gap: 6px; }
+.gw { margin-top: 10px; padding: 10px 12px; border: 1px solid var(--line); border-radius: var(--radius-s); display: grid; gap: 6px; }

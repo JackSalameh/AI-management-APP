@@ -1167,6 +1167,7 @@ async function loadAccount(agent) { try { S.auth[agent] = await api('/api/agent/
 function accountLine(agent, acc) {
   if (!acc) return t('checking');
   if (!acc.loggedIn) return t('notSignedIn');
+  if (acc.method === 'gateway') return t('viaGateway', { name: acc.email });
   const who = acc.email || (acc.method === 'apiKey' ? t('apiKeyLabel') : acc.method === 'oauth_token' || acc.method === 'claude.ai' ? t('claudeSubscription') : acc.method || '');
   return `${t('signedInAs', { who })}${acc.plan ? ` · ${acc.plan}` : ''}`;
 }
@@ -1193,9 +1194,34 @@ function accountBox(agent) {
          h('button', { class: 'btn small', onclick: () => signIn('claude', 'console').then(() => loadAccount('claude').then(draw)) }, t('signInConsole'))]
       : [h('button', { class: `btn small ${acc?.loggedIn ? '' : 'primary'}`, onclick: () => signIn('codex', 'chatgpt').then(() => loadAccount('codex').then(draw)) }, acc?.loggedIn ? t('switchAccount') : t('signInChatGPT')),
          h('button', { class: 'btn small', onclick: async () => { const k = await ask({ title: 'OpenAI API key', label: t('apiKeyLabel'), password: true }); if (k) { try { await api('/api/agent/signin', { agent: 'codex', method: 'apiKey', apiKey: k.trim() }); draw(await loadAccount('codex')); } catch (e) { fail(e); } } } }, t('useApiKey'))];
-    box.replaceChildren(line, h('div', { class: 'inline' }, ...btns, h('button', { class: 'btn small', 'data-tip': t('refresh'), html: icon('refresh'), onclick: async () => draw(await loadAccount(agent)) })));
+    box.replaceChildren(line, h('div', { class: 'inline' }, ...btns, h('button', { class: 'btn small', 'data-tip': t('refresh'), html: icon('refresh'), onclick: async () => draw(await loadAccount(agent)) })), agent === 'claude' ? gatewayBox(() => loadAccount('claude').then(draw)) : null);
   };
   loadAccount(agent).then(draw);
+  return box;
+}
+
+/** Claude Code through OmniRoute (or another Anthropic-compatible gateway): one switch, a model, a test. */
+function gatewayBox(onChange) {
+  const box = h('div', { class: 'gw' }, h('p', { class: 'help' }, '…'));
+  const draw = (g, test) => {
+    if (!g.candidates.length) {
+      box.replaceChildren(h('div', { class: 'help' }, t('gwNone')), h('button', { class: 'btn small', onclick: () => openAddons('gateways') }, t('gwInstall')));
+      return;
+    }
+    const prov = select(g.candidates.map((c) => [c.id, `${c.label} — ${c.baseUrl}`]), g.provider || g.candidates[0].id, () => {});
+    const model = h('input', { class: 'input', value: g.model, placeholder: t('gwModelPh'), spellcheck: 'false', list: 'gw-models' });
+    const dl = h('datalist', { id: 'gw-models' }, ...g.models.map((m) => h('option', { value: m })));
+    const save = async (enabled) => {
+      try { const r = await api('/api/claude/gateway', { enabled, provider: prov.value, model: model.value }); draw(r, r.test); onChange?.(); loadState(false); } catch (e) { fail(e); }
+    };
+    box.replaceChildren(
+      h('label', { class: 'check' }, h('input', { type: 'checkbox', checked: g.enabled, onchange: (e) => save(e.target.checked) }), h('span', {}, t('gwUse'))),
+      h('div', { class: 'help' }, t('gwHelp')),
+      field(t('gwProvider'), prov), field(t('gwModel'), h('div', {}, model, dl), t('gwModelHelp')),
+      h('div', { class: 'inline' }, h('button', { class: 'btn small', onclick: () => save(true) }, g.enabled ? t('gwSaveTest') : t('gwConnect'))),
+      test ? h('div', { class: 'help', style: { color: test.ok ? 'var(--ok)' : 'var(--danger)' } }, test.ok ? t('gwOk', { n: test.models }) : `✕ ${test.error}`) : null);
+  };
+  api('/api/claude/gateway').then((g) => draw(g)).catch((e) => box.replaceChildren(h('div', { class: 'errorbox' }, e.message)));
   return box;
 }
 const AUTH_ERROR = /not logged in|please run \/login|invalid api key|authentication|unauthori[sz]ed|401|sign in|login required|requiresOpenaiAuth/i;

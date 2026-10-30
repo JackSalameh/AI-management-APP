@@ -2,6 +2,14 @@
 
 ## 3.5.0 — 2026-10-30
 
+### Fixed
+- **A second folder appeared next to the conversation's folder**: a conversation created in a folder (e.g.
+  `D:\Test`) had its session copy, `CONTEXT.md` and `INSTRUCTIONS.md` put in `<sessions folder>\<title>`.
+  They now go into the folder you created the conversation in (into a sub-folder of it for a second conversation
+  there). Folders already created that way are moved back automatically at start-up, only when they hold nothing
+  else and no file would be overwritten. Sessions found on disk, Git repositories, drive roots and your home
+  folder still use `<sessions folder>\<title>`, so nothing is written into existing projects.
+
 ### New
 - **Every Claude Code and Codex session on the computer is found and loaded.** The app searches Codex's folder
   (`%USERPROFILE%\.codex\sessions` and `archived_sessions`), Claude Code's folder (`%USERPROFILE%\.claude\projects`),
@@ -22,6 +30,11 @@
   conversation, with its title, its project folder and its memory files.
 - A conversation recorded in a folder that does not exist on this computer (cloud session, Claude desktop app
   virtual machine) runs in the folder named in `session.json`, else in its session folder.
+- **OmniRoute connected to Claude Code** (Configuration › Accounts & providers › Claude Code › “Use OmniRoute for
+  Claude Code”): Claude Code started by the app gets `ANTHROPIC_BASE_URL` = the gateway root (no `/v1`),
+  `ANTHROPIC_AUTH_TOKEN` = your OmniRoute key (kept in the system keychain, passed only in the process
+  environment), `ANTHROPIC_MODEL` (optional, e.g. `glm/glm-5.2`) and model discovery; the gateway's models appear
+  beside Send. “Connect and test” checks `/v1/models`. No Claude sign-in is needed while it is on.
 - `scripts\move-agent-data-windows.cmd`: moves `%USERPROFILE%\.claude` and `.codex` to another drive (default:
   `AppData` next to the app's folder, e.g. `D:\Claude\AppData`) and leaves a directory junction, so Claude Code,
   Codex and this app write every new session there. No administrator rights; safe to run again.

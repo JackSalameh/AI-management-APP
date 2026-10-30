@@ -152,3 +152,69 @@ test('memory files of a session folder can be edited from the app; other files c
   const bad = await api(`/api/memory?file=${encodeURIComponent(path.join(devDir, `${U2}.jsonl`))}`);
   assert.equal(bad.status, 400);
 });
+
+test('bug: a conversation created in a folder keeps its files in that folder, not in a second folder next to it', async () => {
+  const before = fs.readdirSync(sessionsRoot).sort();
+  const f = await api('/api/folder/new', { parent: sessionsRoot, name: 'My project' });
+  assert.equal(f.status, 200, f.error);
+  const proj = path.join(sessionsRoot, 'My project');
+  const n = await api('/api/conversation/new', { agent: 'codex', folder: proj, title: 'First chat' });
+  assert.equal(n.status, 200, n.error);
+  const m = await api('/api/conversation/memory-setup', { key: n.key, enable: true, context: 'Project facts.', instructions: 'Be precise.' });
+  assert.equal(m.status, 200, m.error);
+  events = [];
+  await api('/api/conversation/send', { key: n.key, text: 'hello' });
+  await waitFor((e) => e.type === 'conversation.updated' && e.key === n.key);
+  await api('/api/sessions/scan', {});
+  assert.deepEqual(fs.readdirSync(sessionsRoot).sort(), [...before, 'My project'].sort(), 'no second folder next to "My project"');
+  for (const name of ['session.json', 'CONTEXT.md', 'INSTRUCTIONS.md', 'TRANSCRIPT.md']) assert.ok(fs.existsSync(path.join(proj, name)), name);
+  assert.ok(fs.readdirSync(proj).some((x) => x.startsWith('rollout-')), 'session copy in the folder');
+  const open = await api(`/api/conversation?key=${encodeURIComponent(n.key)}`);
+  assert.equal(open.record.sessionDir, proj);
+  assert.equal(open.record.memoryFound.files.filter((x) => x.file === path.join(proj, 'CONTEXT.md')).length, 1, 'loaded once');
+
+  // A second conversation in the same folder gets a sub-folder of it (still under the folder).
+  const n2 = await api('/api/conversation/new', { agent: 'codex', folder: proj, title: 'Second chat' });
+  await api('/api/conversation/memory-setup', { key: n2.key, enable: true, context: 'Other.', instructions: '' });
+  assert.ok(fs.existsSync(path.join(proj, 'Second chat', 'CONTEXT.md')));
+  assert.equal(fs.readFileSync(path.join(proj, 'CONTEXT.md'), 'utf8').includes('Other.'), false, 'first conversation’s files untouched');
+});
+
+test('repair: session files that 3.5.0 put in a folder next to the conversation’s folder are moved into it', async () => {
+  const proj = path.join(sessionsRoot, 'Old project'), wrong = path.join(sessionsRoot, 'Old chat');
+  fs.mkdirSync(proj);
+  const n = await api('/api/conversation/new', { agent: 'codex', folder: proj, title: 'Old chat' });
+  const rec = srv.app.s.conversations[n.key];
+  // What 3.5.0 did: <sessions folder>/<title> with session.json and the memory files.
+  fs.mkdirSync(wrong);
+  fs.writeFileSync(path.join(wrong, 'session.json'), JSON.stringify({ agent: rec.agent, id: rec.id, title: 'Old chat', cwd: proj }));
+  fs.writeFileSync(path.join(wrong, 'CONTEXT.md'), 'kept context\n');
+  fs.writeFileSync(path.join(wrong, 'INSTRUCTIONS.md'), 'kept instructions\n');
+  rec.sessionDir = wrong;
+  await api('/api/sessions/organize', {});
+  assert.ok(!fs.existsSync(wrong), 'wrong folder removed');
+  assert.equal(fs.readFileSync(path.join(proj, 'CONTEXT.md'), 'utf8'), 'kept context\n');
+  assert.equal(JSON.parse(fs.readFileSync(path.join(proj, 'session.json'), 'utf8')).id, rec.id);
+  assert.equal(srv.app.s.conversations[n.key].sessionDir, proj);
+  // The same outside the sessions folder (the reported case: conversation in D:\Test, files put in D:\Claude\<title>).
+  const outside = path.join(work, 'Test'); fs.mkdirSync(outside);
+  const n3 = await api('/api/conversation/new', { agent: 'codex', folder: outside, title: 'Testing my app' });
+  const rec3 = srv.app.s.conversations[n3.key];
+  const wrong3 = path.join(sessionsRoot, 'Testing my app'); fs.mkdirSync(wrong3);
+  fs.writeFileSync(path.join(wrong3, 'session.json'), JSON.stringify({ agent: rec3.agent, id: rec3.id, title: 'Testing my app', cwd: outside }));
+  fs.writeFileSync(path.join(wrong3, 'CONTEXT.md'), 'ctx\n');
+  rec3.sessionDir = wrong3;
+  await api('/api/sessions/organize', {});
+  assert.ok(!fs.existsSync(wrong3));
+  assert.equal(fs.readFileSync(path.join(outside, 'CONTEXT.md'), 'utf8'), 'ctx\n');
+  // Not moved: sessions found on disk (never written into project folders) and Git repositories.
+  assert.ok(fs.existsSync(path.join(sessionsRoot, 'Analyse the MATLAB results', 'CONTEXT.md')), 'imported Codex session keeps its folder');
+  assert.ok(!fs.existsSync(path.join(work, 'Old', 'session.json')));
+  const repo = path.join(work, 'Repo'); fs.mkdirSync(path.join(repo, '.git'), { recursive: true });
+  const n4 = await api('/api/conversation/new', { agent: 'codex', folder: repo, title: 'In a repository' });
+  await api('/api/conversation/memory-setup', { key: n4.key, enable: true, context: 'r', instructions: '' });
+  assert.ok(fs.existsSync(path.join(sessionsRoot, 'In a repository', 'CONTEXT.md')));
+  assert.ok(!fs.existsSync(path.join(repo, 'session.json')));
+  // A hand-made session folder whose session.json names the working folder (like AImanagementAPPDevelopment) stays.
+  assert.ok(fs.existsSync(path.join(devDir, 'CONTEXT.md')));
+});
