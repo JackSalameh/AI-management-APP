@@ -1,4 +1,4 @@
-# Instructions — Codex Projects Management
+# Instructions — AI Management APP
 
 Working rules agreed with the owner (Jack Salameh). Refine as preferences stabilise.
 
@@ -20,6 +20,12 @@ Working rules agreed with the owner (Jack Salameh). Refine as preferences stabil
 - Skills and plugins from a local folder or a GitHub URL, folder or global scope, never destroying existing installs.
 - Light/dark themes; English, Français, Español, Deutsch with flags; collapsible sidebar; tooltips on every icon; dialogs close on outside click.
 - Works for any OS user: no personal data, paths or credentials in the repository.
+
+## Product direction (3.0)
+- Universal: works with whichever AI the user has an account with; easy for beginners (Simple mode, quick starts, one-click add-ons) and complete for professionals (Pro mode).
+- One place per project: avoid sending the user to other windows or tools.
+- Support only agents that can be verified; prefer major agents (Codex, Claude Code) plus API providers.
+- Never ship or draw vendor logos; offer download from the vendor site or upload.
 
 ## Engineering rules
 - No secrets in code, logs, chat or TOML; store them with the OS facility (DPAPI / Keychain / Secret Service) and pass them to agents as environment variables.

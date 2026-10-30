@@ -1,0 +1,5 @@
+#!/bin/sh
+# Fake npm for add-on tests: records the call and "installs" instantly.
+echo "fake npm $*"
+echo "$*" >> "$FAKE_NPM_LOG"
+exit 0

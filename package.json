@@ -1,13 +1,17 @@
 {
-  "name": "codex-projects-management",
-  "version": "2.0.0",
-  "description": "Desktop workbench for Codex and other coding agents: projects, conversations, memory, Git, VS Code, MATLAB and Jira.",
+  "name": "ai-management-app",
+  "version": "3.0.0",
+  "description": "One workbench for AI agents and providers (Codex, Claude Code, Gemini CLI, OpenAI, Anthropic, Google, Mistral, OpenRouter, Ollama, OmniRoute\u2026): projects, conversations, memory, skills, connectors, Git, VS Code, MATLAB and Jira.",
   "author": "Jack Salameh <jacksalameh@live.com>",
   "license": "UNLICENSED",
   "private": true,
   "type": "module",
-  "engines": { "node": ">=22" },
-  "bin": { "codex-projects-management": "server.mjs" },
+  "engines": {
+    "node": ">=22"
+  },
+  "bin": {
+    "ai-management-app": "server.mjs"
+  },
   "scripts": {
     "start": "node server.mjs --open",
     "serve": "node server.mjs",

@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Codex Projects Management — local server. © 2026 Jack Salameh. All rights reserved.
+// AI Management APP — local server. © 2026 Jack Salameh. All rights reserved.
 // Usage: node server.mjs [--open] [--port N] [--no-agents]
 import http from 'node:http';
 import fs from 'node:fs';
@@ -8,7 +8,8 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { App, HttpError } from './lib/app.mjs';
-import { defaultDataDir } from './lib/store.mjs';
+import { defaultDataDir, migrateLegacyDataDir } from './lib/store.mjs';
+import { ICON_MIME } from './lib/icons.mjs';
 import { openExternal, launchDetached, which } from './lib/proc.mjs';
 import { BRAND } from './lib/brand.mjs';
 import { installLogRing, backupState } from './lib/support.mjs';
@@ -18,7 +19,7 @@ const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC = path.join(ROOT, 'public');
 const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml', '.png': 'image/png', '.json': 'application/json', '.ico': 'image/x-icon', '.woff2': 'font/woff2' };
 
-export async function createServer({ dataDir = defaultDataDir(), codexHome, port = 0, startAgents = true, token = crypto.randomBytes(24).toString('base64url') } = {}) {
+export async function createServer({ dataDir = defaultDataDir(), codexHome, port = 0, startAgents = true, token = crypto.randomBytes(24).toString('base64url'), autoQuit = false } = {}) {
   const app = new App({ dataDir, ...(codexHome ? { codexHome } : {}) });
   const clients = new Set();
   app.on('event', (e) => { const data = `data: ${JSON.stringify(e)}\n\n`; for (const c of clients) c.write(data); });
@@ -93,7 +94,21 @@ export async function createServer({ dataDir = defaultDataDir(), codexHome, port
     'POST /api/plugins/install': (b) => app.installPlugin(b),
     'POST /api/agent/restart': (b) => app.restartAgent(b.agent || 'codex'),
     'POST /api/agent/stop': (b) => app.stopAgent(b.agent || 'codex'),
-    'POST /api/shutdown': () => { setTimeout(() => shutdown(0), 100); return { ok: true }; },
+    'POST /api/shutdown': () => { setTimeout(() => shutdown(0), 150); return { ok: true }; },
+    'GET /api/providers': () => app.providersInfo(),
+    'POST /api/providers/save': (b) => app.saveProvider(b),
+    'POST /api/providers/remove': (b) => app.removeProvider(b.id),
+    'POST /api/providers/test': (b) => app.testProvider(b.id),
+    'GET /api/addons': () => app.addonsInfo(),
+    'POST /api/addons/install': (b) => app.addonInstall(b),
+    'POST /api/skills/preview': (b) => app.previewSkills(b.source),
+    'POST /api/icons/fetch': (b) => app.fetchIcons(b.tools),
+    'POST /api/icons/upload': (b) => app.uploadIcon(b.tool, b.name, b.data),
+    'POST /api/icons/reset': (b) => app.resetIcon(b.tool),
+    'GET /api/project': (q) => app.projectOverview(q.folder),
+    'GET /api/project/files': (q) => app.listFiles(q.folder, q.sub),
+    'GET /api/project/file': (q) => app.readProjectFile(q.folder, q.file),
+    'POST /api/attachments': (b) => app.saveAttachment(b),
   };
 
   const server = http.createServer(async (req, res) => {
@@ -110,9 +125,21 @@ export async function createServer({ dataDir = defaultDataDir(), codexHome, port
     if (url.pathname === '/api/events') {
       res.writeHead(200, { ...security, 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-store', Connection: 'keep-alive' });
       res.write(`data: ${JSON.stringify({ type: 'hello' })}\n\n`);
-      clients.add(res);
+      clients.add(res); clearTimeout(quitTimer);
       const ping = setInterval(() => res.write(': ping\n\n'), 25_000);
-      req.on('close', () => { clearInterval(ping); clients.delete(res); });
+      req.on('close', () => { clearInterval(ping); clients.delete(res); scheduleAutoQuit(); });
+      return;
+    }
+    const icon = /^\/api\/icons\/([a-z]+)$/.exec(url.pathname);
+    if (icon && req.method === 'GET') {
+      const f = app.iconFile(icon[1]);
+      if (!f) { res.writeHead(404, security); res.end(); return; }
+      try {
+        const data = await fsp.readFile(f);
+        // A downloaded SVG must never execute in this origin: sandbox it.
+        res.writeHead(200, { ...security, 'Content-Type': ICON_MIME[path.extname(f)] || 'application/octet-stream', 'Content-Security-Policy': "default-src 'none'; style-src 'unsafe-inline'; sandbox", 'Cache-Control': 'no-cache' });
+        res.end(data);
+      } catch { res.writeHead(404, security); res.end(); }
       return;
     }
     const handler = routes[`${req.method} ${url.pathname}`];
@@ -144,11 +171,20 @@ export async function createServer({ dataDir = defaultDataDir(), codexHome, port
     } catch { res.writeHead(404, security); res.end('Not found'); }
   }
 
+  // Closing the app window = quitting: when the last window has been gone for 20 s (a reload reconnects
+  // within that time), agents are stopped and the server exits. Only for launcher starts (--open).
+  let quitTimer = null;
+  function scheduleAutoQuit() {
+    if (!autoQuit || clients.size || app.s.settings.quitOnWindowClose === false) return;
+    clearTimeout(quitTimer);
+    quitTimer = setTimeout(() => { if (!clients.size) { console.log('[app] window closed — stopping agents and exiting'); shutdown(0); } }, +(process.env.CPM_AUTOQUIT_MS || 20_000));
+  }
+
   async function shutdown(code) {
     for (const c of clients) { try { c.write(`data: ${JSON.stringify({ type: 'server.shutdown' })}\n\n`); c.end(); } catch { /* */ } }
     await app.shutdown().catch(() => {});
     try { const lock = JSON.parse(fs.readFileSync(lockFile, 'utf8')); if (lock.pid === process.pid) fs.rmSync(lockFile); } catch { /* */ }
-    server.close();
+    server.close(); server.closeAllConnections?.();
     if (process.env.CPM_NO_EXIT !== '1') process.exit(code);
   }
 
@@ -171,7 +207,7 @@ function json(res, status, obj, headers = {}) { res.writeHead(status, { ...heade
 function readJson(req) {
   return new Promise((resolve, reject) => {
     let size = 0; const chunks = [];
-    req.on('data', (c) => { size += c.length; if (size > 5 * 1024 * 1024) { reject(new HttpError(413, 'Request too large')); req.destroy(); } else chunks.push(c); });
+    req.on('data', (c) => { size += c.length; if (size > 30 * 1024 * 1024) { reject(new HttpError(413, 'Request too large')); req.destroy(); } else chunks.push(c); });
     req.on('end', () => { try { resolve(chunks.length ? JSON.parse(Buffer.concat(chunks).toString('utf8')) : {}); } catch { reject(new HttpError(400, 'Invalid JSON')); } });
     req.on('error', reject);
   });
@@ -199,6 +235,8 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
   const portArg = args.indexOf('--port');
   installLogRing();
   const dataDir = defaultDataDir();
+  const migrated = migrateLegacyDataDir(dataDir);
+  if (migrated) console.log(`Settings imported from ${migrated}`);
   const major = +process.versions.node.split('.')[0];
   if (major < 22) { console.error(`${BRAND.name} needs Node.js 22 or newer (found ${process.version}).`); process.exit(1); }
   // Single instance per OS user: reuse the running server and just open a window.
@@ -216,8 +254,9 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
   // if it is taken (e.g. by another user's instance), a free port is used instead.
   const wanted = portArg >= 0 ? +args[portArg + 1] : +(process.env.CPM_PORT || stablePort());
   let srv;
-  try { srv = await createServer({ dataDir, port: wanted, startAgents: !args.includes('--no-agents') }); }
-  catch (e) { if (e.code !== 'EADDRINUSE') throw e; srv = await createServer({ dataDir, port: 0, startAgents: !args.includes('--no-agents') }); }
+  const autoQuit = args.includes('--open');
+  try { srv = await createServer({ dataDir, port: wanted, startAgents: !args.includes('--no-agents'), autoQuit }); }
+  catch (e) { if (e.code !== 'EADDRINUSE') throw e; srv = await createServer({ dataDir, port: 0, startAgents: !args.includes('--no-agents'), autoQuit }); }
   console.log(`${BRAND.name} ${BRAND.version} — ${srv.url}`);
   if (args.includes('--open')) await openUi(srv.url, srv.app.s.settings.openMode);
   for (const sig of ['SIGINT', 'SIGTERM']) process.on(sig, () => srv.shutdown(0));

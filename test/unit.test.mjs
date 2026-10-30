@@ -223,3 +223,14 @@ test('proc: Windows shell quoting rejects metacharacters', () => {
   assert.equal(quoteCmdArg('C:\\Program Files\\x'), '"C:\\Program Files\\x"');
   assert.throws(() => quoteCmdArg('a&calc'));
 });
+
+test('rename: settings of Codex Projects Management are imported once', async () => {
+  const { migrateLegacyDataDir } = await import('../lib/store.mjs');
+  const base = tmp();
+  const old = path.join(base, 'codex-projects-management'), neu = path.join(base, 'ai-management-app');
+  fs.mkdirSync(old); fs.writeFileSync(path.join(old, 'state.json'), '{"folders":{"x":1}}'); fs.writeFileSync(path.join(old, 'instance.json'), '{}');
+  assert.equal(migrateLegacyDataDir(neu, {}, 'linux'), old);
+  assert.equal(fs.readFileSync(path.join(neu, 'state.json'), 'utf8'), '{"folders":{"x":1}}');
+  assert.ok(!fs.existsSync(path.join(neu, 'instance.json')), 'running-instance lock not copied');
+  assert.equal(migrateLegacyDataDir(neu, {}, 'linux'), null, 'only once');
+});

@@ -1,5 +1,30 @@
 # Changelog
 
+## 3.0.0 — 2026-10-30 — renamed **AI Management APP**
+
+### New
+- Any provider: Codex and Claude Code agents, plus API services (OpenAI, Anthropic, Google Gemini, Mistral,
+  OpenRouter, DeepSeek, Groq, xAI, Azure OpenAI) and gateways/local models (OmniRoute, Ollama, LM Studio,
+  any OpenAI-compatible URL). Streaming, images, shared memory as system prompt, Stop.
+- Accounts & providers screen; status pill for all AIs; provider choice in the new-conversation window.
+- Project overview per folder: conversations, files with preview, memory, skills, Git, README.
+- Add-ons: one-click install of agents, OmniRoute (install + start + provider), connectors for Codex and
+  Claude Code (Atlassian, GitHub, Playwright, Context7, memory, sequential thinking, filesystem), skill packs
+  with a picker. Progress logs.
+- New conversation in one window: AI, title, optional context and instructions.
+- Attachments (button, drag & drop, paste), quick-start and saved prompts, Simple/Pro mode.
+- Official tool icons downloaded from vendor sites on request, or uploaded; served sandboxed.
+- Closing the window or ⏻ stops all agents (ends account connections) and quits; window closes.
+- Automatic import of settings and keys from Codex Projects Management.
+
+### Removed
+- Gemini CLI agent (could not be validated with a real account; Google Gemini remains available by API key).
+
+### Fixed during this build (found by tests)
+Add-ons button passed its click event as the category · server kept keep-alive connections on quit ·
+keychain entries saved under the old product name would have been lost after the rename.
+
+
 ## 2.0.0 — 2026-10-30 (clean rebuild, signed by Jack Salameh)
 
 Rebuilt from scratch from the v1.x transcript. Zero runtime dependencies; Windows, macOS, Linux.

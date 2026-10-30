@@ -1,11 +1,11 @@
-# Context — Codex Projects Management
+# Context — AI Management APP (formerly Codex Projects Management)
 
 Durable facts, decisions and progress. Keep concise; update as the project evolves.
 
 ## Ownership
 - Author and copyright holder: **Jack Salameh** (jacksalameh@live.com). Not affiliated with, or branded for, any employer.
 - Licence: all rights reserved for now (keeps every publishing option open). Choose an open-source or commercial licence before first public release.
-- Product name is a single constant (`lib/brand.mjs`, `public/brand.js`). "Codex" is an OpenAI trademark: confirm naming rights before publishing under this name.
+- Product name: **AI Management APP** (since 3.0), a single constant in `lib/brand.mjs` (+ `<title>` in public/index.html). Data dir AIManagementApp / ai-management-app; old CodexProjectsManagement data and keychain entries are migrated.
 
 ## Origin
 - A first version (1.0–1.8.3) was built in a Codex CLI session on 29–30 Oct 2026 (rollout `01a1867c-9ded-7832-bb88-912fe27a45cb`). Its source code was not carried over; this repository is a clean rebuild from that transcript, started 30 Oct 2026.
@@ -47,5 +47,13 @@ A local desktop web app that replaces the Codex command window: projects as an E
 - History is read with `thread/turns/list` (paged); `thread/read includeTurns` fails on 0.166 for empty threads.
 - Claude Code sessions are listed from ~/.claude/projects; one `claude -p` process per message.
 
+## Decisions added in 3.0
+- Supported AIs: Codex and Claude Code (CLI agents, file access) + API services through three wire formats (OpenAI-compatible, Anthropic, Gemini). Gemini CLI agent removed on the owner's request (not verifiable with a real account).
+- API conversations are stored by the app in <dataDir>/chats/api-<provider>/<id>.json; memory is sent as the system prompt with a "suggest memory updates" header (they cannot edit files).
+- Add-on catalog contains only names verified on 2026-10-30 (npm registry, GitHub, vendor docs): omniroute 3.8.52 (port 20128, /v1), Atlassian MCP https://mcp.atlassian.com/v1/mcp/authv2 (OAuth), GitHub MCP https://api.githubcopilot.com/mcp/ (Bearer PAT), @playwright/mcp, @upstash/context7-mcp, @modelcontextprotocol/server-memory|sequential-thinking|filesystem, anthropics/skills, openai/skills.
+- Official logos are never bundled or drawn: downloaded from vendor sites to the user's data folder on request, or uploaded.
+- Closing the app window quits after 20 s without a window (reloads reconnect in time); ⏻ quits immediately.
+
 ## Progress
+- 2026-10-30: 3.0.0 — 50 automated tests, 32 browser flows (3 suites), real codex-cli 0.166.0 smoke test.
 - 2026-10-30: rebuild completed as 2.0.0 in a cloud workspace (not deployed). Validation: 40 automated tests, 23 browser flows, smoke test against real codex-cli 0.166.0 (no account), Claude adapter read of a real session. Not verified: Windows-only paths (DPAPI, .vbs, Edge app window, MATLAB launch), real Jira/Bitbucket accounts, paid model replies. See CHANGELOG.md.

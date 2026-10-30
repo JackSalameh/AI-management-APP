@@ -65,6 +65,10 @@ const P = {
   git: '<rect x="4.2" y="4.2" width="15.6" height="15.6" rx="2" transform="rotate(45 12 12)"/><circle cx="12" cy="8" r="1.4"/><circle cx="12" cy="16" r="1.4"/><circle cx="15.5" cy="12" r="1.4"/><path d="M12 9.4v5.2M13.1 9.1l1.6 1.8"/>',
   bitbucket: '<path d="M3.5 4.5h17l-2.5 15h-12z"/><path d="m9.5 10 1 5h3l1-5z"/>',
   jira: '<path d="M12 3.5 20.5 12 12 20.5 3.5 12z"/><path d="M12 8.5 15.5 12 12 15.5 8.5 12z"/>',
+  api: '<rect x="3.5" y="6" width="17" height="12" rx="3"/><path d="M8 10l-2 2 2 2M16 10l2 2-2 2M13.5 9l-3 6"/>',
+  paperclip: '<path d="M20 11.5 12.3 19.2a5 5 0 0 1-7.1-7.1l8-8a3.4 3.4 0 0 1 4.8 4.8l-8 8a1.7 1.7 0 0 1-2.4-2.4l7.4-7.4"/>',
+  home: '<path d="M4 11 12 4l8 7v8.5a.5.5 0 0 1-.5.5H15v-6H9v6H4.5a.5.5 0 0 1-.5-.5z"/>',
+  spark: '<path d="M12 3v4M12 17v4M3 12h4M17 12h4M6 6l2.5 2.5M15.5 15.5 18 18M6 18l2.5-2.5M15.5 8.5 18 6"/>',
   bot: '<rect x="4.5" y="7.5" width="15" height="11" rx="3"/><path d="M12 4v3.5M9 12.5h.01M15 12.5h.01M9.5 15.5h5"/>',
 };
 
@@ -73,12 +77,16 @@ export function icon(name, cls = '') {
 }
 
 /** Official logos are optional: `public/logos/<tool>.svg` replaces the generic glyph when present. */
-let logoFiles = [];
-export function setLogos(list) { logoFiles = Array.isArray(list) ? list : []; }
-export async function toolIcon(tool) {
+let logoFiles = [], userIcons = {}, tokenQ = '';
+/** Icons: a user-downloaded/uploaded official icon (served by the app) wins over public/logos files and generic glyphs. */
+export function setLogos(list, icons = {}, token = '') { logoFiles = Array.isArray(list) ? list : []; userIcons = icons || {}; tokenQ = token; }
+export async function toolIcon(tool, fallback = tool) {
+  if (userIcons[tool]) return `<img class="ic logo" src="/api/icons/${tool}?token=${encodeURIComponent(tokenQ)}&v=${encodeURIComponent(userIcons[tool])}" alt="">`;
   const f = logoFiles.find((x) => x.replace(/\.(svg|png)$/i, '').toLowerCase() === tool);
-  return f ? `<img class="ic logo" src="logos/${encodeURIComponent(f)}" alt="">` : icon(tool);
+  return f ? `<img class="ic logo" src="logos/${encodeURIComponent(f)}" alt="">` : icon(fallback);
 }
+/** [icon key for official icon, neutral fallback glyph] per agent. */
+export function agentIconName(agentId) { return agentId === 'codex' ? ['codex', 'terminal'] : agentId === 'claude' ? ['claude', 'bot'] : ['api', 'api']; }
 
 export const FLAGS = {
   en: '<svg viewBox="0 0 30 20" class="flag"><rect width="30" height="20" fill="#012169"/><path d="M0 0l30 20M30 0 0 20" stroke="#fff" stroke-width="4"/><path d="M0 0l30 20M30 0 0 20" stroke="#C8102E" stroke-width="1.6"/><path d="M15 0v20M0 10h30" stroke="#fff" stroke-width="6"/><path d="M15 0v20M0 10h30" stroke="#C8102E" stroke-width="3.4"/></svg>',

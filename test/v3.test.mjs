@@ -1,0 +1,231 @@
+// v3 features: API providers (3 wire formats), Gemini CLI, add-ons, icons, project hub, attachments, quit-on-close.
+import { test, before, after } from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import http from 'node:http';
+import { fileURLToPath } from 'node:url';
+import { pickIconLinks } from '../lib/icons.mjs';
+import { normalizeProvider } from '../lib/providers.mjs';
+
+const here = path.dirname(fileURLToPath(import.meta.url));
+const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cpm-v3-'));
+const dataDir = path.join(root, 'data'), codexHome = path.join(root, 'codex'), work = path.join(root, 'work'), ghome = path.join(root, 'ghome');
+for (const d of [codexHome, work, ghome]) fs.mkdirSync(d, { recursive: true });
+process.env.CPM_CODEX_BIN = path.join(here, 'fixtures', 'fake-codex.mjs');
+process.env.CPM_CLAUDE_BIN = path.join(root, 'none');
+process.env.CLAUDE_CONFIG_DIR = path.join(root, 'claude');
+process.env.FAKE_NPM_LOG = path.join(root, 'npm.log');
+process.env.PATH = `${path.join(here, 'fixtures', 'bin')}${path.delimiter}${process.env.PATH}`;
+process.env.CPM_NO_EXIT = '1';
+const { createServer } = await import('../server.mjs');
+
+// ---- stub provider endpoints (OpenAI-compatible, Anthropic, Gemini), recording requests
+const seen = [];
+const stub = http.createServer((req, res) => {
+  let body = ''; req.on('data', (d) => { body += d; });
+  req.on('end', () => {
+    const j = body ? JSON.parse(body) : null;
+    seen.push({ url: req.url, headers: req.headers, body: j });
+    const sse = (events) => { res.writeHead(200, { 'content-type': 'text/event-stream' }); for (const e of events) res.write(`data: ${JSON.stringify(e)}\n\n`); res.end(); };
+    if (req.url === '/oa/v1/models') return res.end(JSON.stringify({ data: [{ id: 'gpt-x' }, { id: 'mistral-y' }] }));
+    if (req.url === '/oa/v1/chat/completions') {
+      if (j.reasoning_effort && j.model === 'mistral-y') { res.writeHead(400); return res.end(JSON.stringify({ error: { message: 'reasoning_effort not supported' } })); }
+      const last = j.messages.at(-1).content;
+      const text = Array.isArray(last) ? last.find((c) => c.type === 'text').text : last;
+      return sse([{ choices: [{ delta: { content: 'Hello ' } }] }, { choices: [{ delta: { content: `OA:${text}` } }] }, { choices: [], usage: { total_tokens: 12 } }]);
+    }
+    if (req.url.startsWith('/an/v1/models')) return res.end(JSON.stringify({ data: [{ id: 'claude-z' }] }));
+    if (req.url === '/an/v1/messages') return sse([{ type: 'message_start' }, { type: 'content_block_delta', delta: { type: 'text_delta', text: `AN:${j.messages.at(-1).content}` } }, { type: 'message_delta', usage: { input_tokens: 3, output_tokens: 4 } }]);
+    if (req.url.startsWith('/ge/v1beta/models?')) return res.end(JSON.stringify({ models: [{ name: 'models/gemini-q', supportedGenerationMethods: ['generateContent'] }, { name: 'models/embed', supportedGenerationMethods: ['embedContent'] }] }));
+    if (req.url.startsWith('/ge/v1beta/models/gemini-q:streamGenerateContent')) return sse([{ candidates: [{ content: { parts: [{ text: `GE:${j.contents.at(-1).parts.at(-1).text}` }] } }], usageMetadata: { totalTokenCount: 9 } }]);
+    if (req.url === '/slow/v1/chat/completions') { res.writeHead(200, { 'content-type': 'text/event-stream' }); res.write(`data: ${JSON.stringify({ choices: [{ delta: { content: 'partial' } }] })}\n\n`); return; }
+    res.writeHead(404); res.end('{}');
+  });
+});
+await new Promise((r) => stub.listen(0, '127.0.0.1', r));
+const SB = `http://127.0.0.1:${stub.address().port}`;
+
+let srv, base, events = [];
+async function api(p, body) {
+  const r = await fetch(base + p, { method: body === undefined ? 'GET' : 'POST', headers: { 'x-cpm-token': srv.token, ...(body !== undefined ? { 'content-type': 'application/json' } : {}) }, body: body === undefined ? undefined : JSON.stringify(body) });
+  const j = await r.json().catch(() => ({}));
+  if (Array.isArray(j)) { j.status = r.status; return j; }
+  return { status: r.status, ...j };
+}
+const waitFor = async (pred, ms = 6000) => { const t0 = Date.now(); while (Date.now() - t0 < ms) { const e = events.find(pred); if (e) return e; await new Promise((r) => setTimeout(r, 20)); } throw new Error('timeout'); };
+const fake = () => JSON.parse(fs.readFileSync(path.join(codexHome, 'fake-state.json'), 'utf8'));
+
+before(async () => {
+  srv = await createServer({ dataDir, codexHome, port: 0 });
+  base = `http://127.0.0.1:${srv.port}`;
+  srv.app.on('event', (e) => events.push(e));
+  for (let i = 0; i < 100 && srv.app.agents.codex.state !== 'ready'; i++) await new Promise((r) => setTimeout(r, 30));
+});
+after(async () => { await srv.shutdown(0); stub.close(); });
+
+test('provider validation', () => {
+  assert.throws(() => normalizeProvider({ preset: 'custom', baseUrl: 'http://example.com/v1' }), /https/);
+  assert.equal(normalizeProvider({ preset: 'ollama' }).baseUrl, 'http://localhost:11434/v1');
+  assert.throws(() => normalizeProvider({ preset: 'azure' }), /service URL/);
+  assert.equal(normalizeProvider({ preset: 'omniroute' }, []).id, 'omniroute-local-gateway');
+});
+
+async function chat(providerBody, model, text, effort) {
+  const p = await api('/api/providers/save', providerBody);
+  assert.equal(p.status, 200, p.error);
+  assert.ok(p.test.ok, JSON.stringify(p.test));
+  const agent = `api-${p.provider.id}`;
+  await api('/api/refresh', {});
+  const n = await api('/api/conversation/new', { agent, folder: path.join(work, 'Chat', p.provider.id), modelKey: `${agent}:${model}`, effort });
+  assert.equal(n.status, 200, n.error);
+  events = [];
+  const s = await api('/api/conversation/send', { key: n.key, text, modelKey: `${agent}:${model}`, effort });
+  assert.equal(s.status, 200, s.error);
+  const done = await waitFor((e) => e.type === 'turn.completed' && e.key === n.key);
+  return { key: n.key, done, agent, provider: p.provider };
+}
+
+test('OpenAI-compatible provider: key stored as secret, streamed reply, history kept, retry without unsupported effort', async () => {
+  const { key, done, provider } = await chat({ preset: 'custom', label: 'Stub OA', baseUrl: `${SB}/oa/v1`, keyName: 'STUB_OA_KEY', key: 'sk-stub-oa' }, 'mistral-y', 'ping', 'high');
+  assert.equal(done.status, 'completed');
+  const req = seen.filter((r) => r.url === '/oa/v1/chat/completions').at(-1);
+  assert.equal(req.headers.authorization, 'Bearer sk-stub-oa');
+  assert.equal(req.body.reasoning_effort, undefined, 'retried without reasoning_effort after a 400');
+  assert.ok(events.some((e) => e.type === 'item.delta' && e.key === key));
+  const c = await api(`/api/conversation?key=${encodeURIComponent(key)}`);
+  assert.deepEqual(c.items.map((i) => i.kind), ['user', 'agent']);
+  assert.equal(c.items[1].text, 'Hello OA:ping');
+  assert.ok(!JSON.stringify(await api('/api/state')).includes('sk-stub-oa'), 'key never exposed');
+  assert.equal(provider.keyName, 'STUB_OA_KEY');
+  events = [];
+  await api('/api/conversation/send', { key, text: 'second' });
+  await waitFor((e) => e.type === 'turn.completed' && e.key === key);
+  assert.equal(seen.filter((r) => r.url === '/oa/v1/chat/completions').at(-1).body.messages.filter((m) => m.role !== 'system').length, 3, 'history sent');
+});
+
+test('Anthropic and Gemini API wire formats', async () => {
+  const a = await chat({ preset: 'anthropic', label: 'Stub AN', baseUrl: `${SB}/an`, key: 'ak' }, 'claude-z', 'hi there');
+  assert.equal(a.done.status, 'completed');
+  const ar = seen.filter((r) => r.url === '/an/v1/messages').at(-1);
+  assert.equal(ar.headers['x-api-key'], 'ak'); assert.equal(ar.headers['anthropic-version'], '2023-06-01');
+  assert.equal((await api(`/api/conversation?key=${encodeURIComponent(a.key)}`)).items[1].text, 'AN:hi there');
+  const g = await chat({ preset: 'google', label: 'Stub GE', baseUrl: `${SB}/ge`, key: 'gk' }, 'gemini-q', 'bonjour');
+  assert.equal(g.done.status, 'completed');
+  assert.equal(seen.filter((r) => r.url.includes(':streamGenerateContent')).at(-1).headers['x-goog-api-key'], 'gk');
+  const models = (await api('/api/state')).models.filter((m) => m.agent === g.agent).map((m) => m.id);
+  assert.deepEqual(models, ['gemini-q'], 'only generateContent models listed');
+});
+
+test('API chat: shared memory becomes the system prompt with a non-editing header; Stop aborts the stream', async () => {
+  const p = await api('/api/providers/save', { preset: 'custom', label: 'Stub Mem', baseUrl: `${SB}/oa/v1`, keyName: '' });
+  const agent = `api-${p.provider.id}`;
+  const n = await api('/api/conversation/new', { agent, folder: path.join(work, 'Mem3'), modelKey: `${agent}:gpt-x` });
+  await api('/api/conversation/memory-setup', { key: n.key, enable: true, instructions: 'Reply in French.' });
+  events = [];
+  await api('/api/conversation/send', { key: n.key, text: 'go', modelKey: `${agent}:gpt-x` });
+  await waitFor((e) => e.type === 'turn.completed' && e.key === n.key);
+  const req = seen.filter((r) => r.url === '/oa/v1/chat/completions').at(-1);
+  assert.equal(req.body.messages[0].role, 'system');
+  assert.match(req.body.messages[0].content, /Reply in French[\s\S]*/);
+  assert.match(req.body.messages[0].content, /Suggested memory update/);
+  assert.equal(req.body.messages.at(-1).content, 'go', 'user text without the memory block');
+  const slow = await api('/api/providers/save', { preset: 'custom', label: 'Slow', baseUrl: `${SB}/slow/v1`, keyName: '', models: ['m'] });
+  assert.ok(slow.provider);
+  const sa = `api-${slow.provider.id}`;
+  const n2 = await api('/api/conversation/new', { agent: sa, folder: path.join(work, 'Slow'), modelKey: `${sa}:m` });
+  events = [];
+  await api('/api/conversation/send', { key: n2.key, text: 'wait', modelKey: `${sa}:m` });
+  await waitFor((e) => e.type === 'item.delta' && e.key === n2.key);
+  assert.ok((await api('/api/conversation/stop', { key: n2.key })).stopped);
+  assert.equal((await waitFor((e) => e.type === 'turn.completed' && e.key === n2.key)).status, 'interrupted');
+});
+
+test('local provider not running gives an actionable message', async () => {
+  const r = await api('/api/providers/save', { preset: 'custom', label: 'Down', baseUrl: 'http://127.0.0.1:9/v1', keyName: '' });
+  assert.equal(r.test.ok, false);
+  assert.match(r.test.error, /not reachable[\s\S]*Start it first/);
+});
+
+test('add-ons: catalog, npm install job, MCP connector to Codex, token kept out of files', async () => {
+  const cat = await api('/api/addons');
+  assert.ok(cat.catalog.find((c) => c.id === 'omniroute').install.npm === 'omniroute');
+  assert.ok(!cat.catalog.some((c) => /gemini/i.test(c.id)), 'no Gemini CLI agent');
+  events = [];
+  const j = await api('/api/addons/install', { id: 'claude-code' });
+  const done = await waitFor((e) => e.type === 'job.update' && e.job.id === j.job && e.job.status !== 'running');
+  assert.equal(done.job.status, 'done', done.job.log);
+  assert.match(fs.readFileSync(process.env.FAKE_NPM_LOG, 'utf8'), /install -g @anthropic-ai\/claude-code/);
+  events = [];
+  const g = await api('/api/addons/install', { id: 'mcp-github', token: 'ghp_secretTOKEN1234567890' });
+  const gd = await waitFor((e) => e.type === 'job.update' && e.job.id === g.job && e.job.status !== 'running');
+  assert.equal(gd.job.status, 'done', gd.job.log);
+  assert.equal(fake().config.mcp_servers.github.bearer_token_env_var, 'GITHUB_PAT');
+  assert.ok(!JSON.stringify(fake().config).includes('ghp_'), 'token not written to config');
+  events = [];
+  const fsys = await api('/api/addons/install', { id: 'mcp-filesystem' });
+  const fd = await waitFor((e) => e.type === 'job.update' && e.job.id === fsys.job && e.job.status !== 'running');
+  assert.equal(fd.job.status, 'failed', 'folder required');
+  events = [];
+  const fs2 = await api('/api/addons/install', { id: 'mcp-filesystem', folder: work });
+  await waitFor((e) => e.type === 'job.update' && e.job.id === fs2.job && e.job.status === 'done');
+  assert.deepEqual(fake().config.mcp_servers.filesystem.args.at(-1), work);
+});
+
+test('icons: link picking, upload, served sandboxed', async () => {
+  const links = pickIconLinks('<link rel="icon" href="/a.png" sizes="32x32"><link rel="apple-touch-icon" href="/t.png"><link rel="icon" type="image/svg+xml" href="/i.svg">', 'https://x.test/p');
+  assert.deepEqual(links.slice(0, 3), ['https://x.test/i.svg', 'https://x.test/t.png', 'https://x.test/a.png']);
+  assert.equal(links.at(-1), 'https://x.test/favicon.ico');
+  const svg = Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>').toString('base64');
+  assert.equal((await api('/api/icons/upload', { tool: 'git', name: 'git.svg', data: svg })).icons.git, 'git.svg');
+  const r = await fetch(`${base}/api/icons/git?token=${srv.token}`);
+  assert.equal(r.status, 200);
+  assert.match(r.headers.get('content-security-policy'), /sandbox/);
+  assert.equal((await api('/api/icons/upload', { tool: 'git', name: 'x.exe', data: svg })).status, 400);
+  assert.equal((await fetch(`${base}/api/icons/git`)).status, 401);
+});
+
+test('project hub: overview, files, file preview, and folder boundary', async () => {
+  const folder = path.join(work, 'Hub');
+  fs.mkdirSync(path.join(folder, 'src'), { recursive: true });
+  fs.writeFileSync(path.join(folder, 'README.md'), '# Hub project\nMeasures things.');
+  fs.writeFileSync(path.join(folder, 'src', 'main.m'), 'disp(1)');
+  await api('/api/conversation/new', { folder });
+  const o = await api(`/api/project?folder=${encodeURIComponent(folder)}`);
+  assert.equal(o.name, 'Hub'); assert.match(o.readme, /Hub project/); assert.equal(o.conversations.length, 1);
+  assert.deepEqual(o.files.entries.map((e) => e.name), ['src', 'README.md']);
+  const sub = await api(`/api/project/files?folder=${encodeURIComponent(folder)}&sub=src`);
+  assert.equal(sub.entries[0].name, 'main.m');
+  assert.equal((await api(`/api/project/file?folder=${encodeURIComponent(folder)}&file=${encodeURIComponent(path.join(folder, 'src', 'main.m'))}`)).text, 'disp(1)');
+  assert.equal((await api(`/api/project/file?folder=${encodeURIComponent(folder)}&file=${encodeURIComponent('/etc/passwd')}`)).status, 403);
+  assert.equal((await api(`/api/project/files?folder=${encodeURIComponent(folder)}&sub=${encodeURIComponent('../..')}`)).status, 403);
+  assert.equal((await api(`/api/project?folder=${encodeURIComponent('/etc')}`)).status, 403);
+});
+
+test('attachments: text inlined, image passed as image, arbitrary paths refused', async () => {
+  const n = await api('/api/conversation/new', { folder: path.join(work, 'Attach') });
+  const t = await api('/api/attachments', { key: n.key, name: 'notes.txt', data: Buffer.from('measured 12.5 mm').toString('base64') });
+  const i = await api('/api/attachments', { key: n.key, name: 'shot.png', data: Buffer.from([137, 80, 78, 71, 0, 1]).toString('base64') });
+  assert.equal(t.kind, 'text'); assert.equal(i.kind, 'image');
+  events = [];
+  await api('/api/conversation/send', { key: n.key, text: 'see files', attachments: [t, i, { path: '/etc/passwd', kind: 'text' }] });
+  await waitFor((e) => e.type === 'turn.completed' && e.key === n.key);
+  const sent = fake().threads[n.key.split(':')[1]].lastTurnParams.text;
+  assert.match(sent, /measured 12\.5 mm/);
+  assert.doesNotMatch(sent, /root:/);
+});
+
+test('closing the window stops the agents and exits (auto-quit)', async () => {
+  process.env.CPM_AUTOQUIT_MS = '300';
+  const s2 = await createServer({ dataDir: path.join(root, 'd2'), codexHome: path.join(root, 'c2'), port: 0, autoQuit: true });
+  for (let i = 0; i < 100 && s2.app.agents.codex.state !== 'ready'; i++) await new Promise((r) => setTimeout(r, 30));
+  const ctrl = new AbortController();
+  const res = await fetch(`http://127.0.0.1:${s2.port}/api/events?token=${s2.token}`, { signal: ctrl.signal });
+  assert.equal(res.status, 200);
+  ctrl.abort();
+  await new Promise((r) => setTimeout(r, 1200));
+  assert.equal(s2.app.agents.codex.state, 'stopped', 'agent connection closed');
+  await assert.rejects(fetch(`http://127.0.0.1:${s2.port}/api/health`, { headers: { 'x-cpm-token': s2.token } }), 'server exited');
+  delete process.env.CPM_AUTOQUIT_MS;
+});

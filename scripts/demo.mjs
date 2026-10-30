@@ -16,6 +16,22 @@ process.env.CPM_CODEX_BIN = path.join(root, 'test', 'fixtures', 'fake-codex.mjs'
 process.env.CPM_CLAUDE_BIN = path.join(sandbox, 'no-claude');
 process.env.CPM_DATA_DIR = dataDir;
 process.env.CLAUDE_CONFIG_DIR = path.join(sandbox, 'claude'); // keep the demo away from real Claude Code sessions
+// Multi-provider demo: fake npm (add-on installs do nothing) and a local OpenAI-compatible echo service.
+process.env.FAKE_NPM_LOG = path.join(sandbox, 'npm.log');
+process.env.PATH = `${path.join(root, 'test', 'fixtures', 'bin')}${path.delimiter}${process.env.PATH}`;
+const http = await import('node:http');
+const echo = http.createServer((req, res) => {
+  let b = ''; req.on('data', (d) => { b += d; });
+  req.on('end', () => {
+    if (req.url.endsWith('/models')) return res.end(JSON.stringify({ data: [{ id: 'demo-small' }, { id: 'demo-large' }] }));
+    const j = JSON.parse(b || '{}'); const last = j.messages?.at(-1)?.content; const text = Array.isArray(last) ? last.find((c) => c.type === 'text')?.text : last;
+    res.writeHead(200, { 'content-type': 'text/event-stream' });
+    const reply = `(${j.model}) You said: **${String(text || '').slice(0, 200)}**\n\nThis is a simulated API provider for the demo.`;
+    let i = 0; const iv = setInterval(() => { if (i >= reply.length) { res.end('data: [DONE]\n\n'); clearInterval(iv); return; } res.write(`data: ${JSON.stringify({ choices: [{ delta: { content: reply.slice(i, i + 12) } }] })}\n\n`); i += 12; }, 25);
+  });
+});
+await new Promise((r) => echo.listen(0, '127.0.0.1', r));
+const echoUrl = `http://127.0.0.1:${echo.address().port}/v1`;
 
 // Seed: X1191 › Distance focal (2 conversations), X1191 › Optics, a Git repo, and one MATLAB-like file.
 const now = Math.floor(Date.now() / 1000);
@@ -48,6 +64,7 @@ fs.mkdirSync(path.join(head, '.cpm'), { recursive: true });
 fs.writeFileSync(path.join(head, '.cpm', 'CONTEXT.md'), '# Context — X1191\n\nOptical bench project. Camera: 5 MP, pixel 3.45 µm.\n');
 
 const args = process.argv.slice(2);
+fs.writeFileSync(path.join(dataDir, 'state.json'), JSON.stringify({ schema: 1, providers: [{ id: 'demo-api', preset: 'custom', kind: 'openai', label: 'Demo API (OpenAI-compatible)', baseUrl: echoUrl, keyName: '', authHeader: null, models: [], enabled: true }] }));
 const { createServer, openUi } = await import('../server.mjs');
 const portArg = args.indexOf('--port');
 const srv = await createServer({ dataDir, codexHome, port: portArg >= 0 ? +args[portArg + 1] : 0 });

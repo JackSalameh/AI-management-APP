@@ -1,5 +1,5 @@
 // Codex Projects Management — client. © 2026 Jack Salameh. All rights reserved.
-import { icon, toolIcon, setLogos, FLAGS } from './icons.js';
+import { icon, toolIcon, setLogos, agentIconName, FLAGS } from './icons.js';
 import { t, setLang, getLang, LANGS } from './i18n.js';
 import { renderMarkdown, esc, diffHtml, highlightCode } from './markdown.js';
 
@@ -164,13 +164,18 @@ function buildShell() {
 }
 
 async function renderTop() {
-  const sum = S.sum, cx = sum.agents.codex, tools = sum.tools;
-  const state = cx.state;
-  const pill = h('button', { class: 'agent-pill', style: { border: 0, cursor: 'pointer' }, 'data-tip': cx.error || `Codex ${cx.version || ''}`.trim(), onclick: (e) => showMenu(e.currentTarget, [
-    { label: t('reconnect'), icon: 'refresh', run: reconnect },
-    { label: t('quitAgent'), icon: 'stop', run: () => api('/api/agent/stop', { agent: 'codex' }).then(loadState).catch(fail) },
-    '-', { label: t('configuration'), icon: 'gear', run: () => openSettings('agents') },
-  ]) }, h('span', { class: `dot ${state}` }), `Codex · ${t(state) || state}`);
+  const sum = S.sum, tools = sum.tools;
+  // One pill for every AI the user can reach (CLI agents + API services).
+  const agents = Object.entries(sum.agents).filter(([, a]) => a.state !== 'missing');
+  const readyN = agents.filter(([, a]) => ['ready', 'idle'].includes(a.state)).length;
+  const worst = agents.some(([, a]) => a.state === 'error') ? 'error' : agents.some(([, a]) => a.state === 'starting') ? 'starting' : readyN ? 'ready' : 'missing';
+  const pill = h('button', { class: 'agent-pill', style: { border: 0, cursor: 'pointer' }, 'data-tip': agents.map(([, a]) => `${a.label}: ${t(a.state) || a.state}`).join(' · ') || t('accounts'), onclick: (e) => showMenu(e.currentTarget, [
+    ...agents.map(([id, a]) => ({ label: `${a.label} — ${t(a.state) || a.state}`, html: `<span class="dot ${a.state}" style="margin:0 5px"></span>`, run: () => (id === 'codex' ? reconnect() : openSettings('accounts')) })),
+    '-',
+    { label: t('reconnect') + ' (Codex)', icon: 'refresh', run: reconnect },
+    { label: t('accounts'), icon: 'key', run: () => openSettings('accounts') },
+    { label: t('addons'), icon: 'puzzle', run: openAddons },
+  ]) }, h('span', { class: `dot ${worst}` }), `AI · ${t('agentsReady', { n: readyN })}`);
   const toolBtn = async (id, label, onclick) => {
     const on = tools[id]?.enabled;
     const b = h('button', { class: `ibtn ${on ? '' : 'off'}`, 'data-tip': `${label}${on ? '' : ' — ' + t('enabled').toLowerCase() + ': ✕'}`, 'aria-label': label, html: await toolIcon(id), onclick: on ? onclick : () => openSettings('tools', id) });
@@ -194,9 +199,22 @@ async function renderTop() {
     h('div', { class: 'sep' }),
     h('button', { class: 'langsel', 'data-tip': t('language'), onclick: (e) => showMenu(e.currentTarget, Object.entries(LANGS).map(([k, v]) => ({ label: v.name, html: FLAGS[k], cls: 'flagopt', run: () => changeLang(k) }))), html: FLAGS[lang] + `<span>${lang.toUpperCase()}</span>` }),
     ib(document.documentElement.dataset.theme === 'dark' ? 'sun' : 'moon', t('theme'), () => { patchSettings({ theme: document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark' }, true); applyTheme(); renderTop(); }),
+    ib('search', t('searchAll') + ' (Ctrl+K)', () => openSearch()),
+    ib('puzzle', t('addons'), () => openAddons()),
+    h('button', { class: 'langsel', 'data-tip': t('simpleHelp'), onclick: () => { const m = (settings().uiMode || 'simple') === 'simple' ? 'pro' : 'simple'; patchSettings({ uiMode: m }, true); document.body.classList.toggle('mode-simple', m === 'simple'); renderAll(); } }, (settings().uiMode || 'simple') === 'simple' ? t('simpleMode') : t('proMode')),
     ib('gear', t('configuration'), () => openSettings()),
-    ib('power', t('shutdown'), async () => { if (await confirmBox({ title: t('shutdown'), text: t('shutdown') + '?', okLabel: t('shutdown'), danger: true })) { await api('/api/shutdown', {}).catch(() => {}); showClosed(); } }),
+    ib('power', t('shutdown'), quitApp),
   );
+}
+
+/** Quit = stop every agent (ends account connections), stop the server, close the window. */
+async function quitApp() {
+  if (!await confirmBox({ title: t('shutdown'), text: t('quitOnClose'), okLabel: t('shutdown'), danger: true })) return;
+  toast(t('closing'));
+  await api('/api/shutdown', {}).catch(() => {});
+  es?.close();
+  window.close(); // works for the app window opened by the launcher
+  setTimeout(showClosed, 300); // a normal browser tab may refuse to close itself
 }
 
 function changeLang(l) { setLang(l); patchSettings({ lang: l }, true); renderAll(); }
@@ -243,8 +261,8 @@ function renderTree(convs = convByKey()) {
     if (!visible(node)) return;
     const open = term ? true : isExpanded(node.path, depth);
     const pad = 4 + depth * 14;
-    const row = h('div', { class: `row folder ${open ? 'open' : ''} ${S.selFolder && pk(S.selFolder) === pk(node.path) && !S.conv ? 'selected' : ''}`, role: 'treeitem', style: { paddingLeft: pad + 'px' }, title: node.path,
-      onclick: () => { S.selFolder = node.path; setExpanded(node.path, !open); renderTree(); },
+    const row = h('div', { class: `row folder ${open ? 'open' : ''} ${S.project && pk(S.project.folder) === pk(node.path) && !S.conv ? 'selected' : ''}`, role: 'treeitem', style: { paddingLeft: pad + 'px' }, title: node.path,
+      onclick: (e) => { S.selFolder = node.path; if (e.target.closest('.twisty') || depth === 0) { setExpanded(node.path, !open); renderTree(); return; } if (!open) setExpanded(node.path, true); openProject(node.path); },
       oncontextmenu: (e) => { e.preventDefault(); folderMenu(e.target.closest('.row'), node); },
       ondragover: (e) => { if (e.dataTransfer.types.includes('cpm/conv')) { e.preventDefault(); row.classList.add('drop'); } },
       ondragleave: () => row.classList.remove('drop'),
@@ -253,6 +271,7 @@ function renderTree(convs = convByKey()) {
     h('span', { class: 'kind', html: icon(depth === 0 ? 'drive' : open ? 'folderOpen' : 'folder') }),
     h('span', { class: 'label' }, node.name),
     node.total ? h('span', { class: 'count' }, node.total) : null,
+    depth > 0 ? h('button', { class: 'ibtn rowbtn', 'data-tip': t('projectHub'), html: icon('home'), onclick: (e) => { e.stopPropagation(); openProject(node.path); } }) : null,
     h('button', { class: 'ibtn rowbtn', 'data-tip': t('newChatHere'), html: icon('plus'), onclick: (e) => { e.stopPropagation(); newConversation(node.path); } }),
     h('button', { class: 'ibtn rowbtn', 'data-tip': '⋯', html: icon('more'), onclick: (e) => { e.stopPropagation(); folderMenu(e.currentTarget, node); } }));
     tree.append(row);
@@ -362,15 +381,55 @@ async function openFolderFlow() {
   try { const r = await api('/api/folder/add', { path: f, create: true }); S.selFolder = r.path; await afterChange(); } catch (e) { fail(e); }
 }
 
-async function newConversation(folder) {
+/** Available AIs for a new conversation: installed CLI agents and configured API services. */
+function availableAgents() {
+  return Object.entries(S.sum.agents).filter(([, a]) => ['ready', 'idle', 'starting', 'stopped', 'error'].includes(a.state) && !(a.kind === 'api' && a.state === 'stopped')).map(([id, a]) => ({ id, label: a.label, cap: S.sum.capabilities?.[id] || {} }));
+}
+
+/** One window: choose the AI, then title, context and instructions (the memory files are optional). */
+async function newConversation(folder, opts = {}) {
   folder = folder || S.selFolder || S.conv?.record?.cwd;
   if (!folder) { folder = await pickFolder(); if (!folder) return; }
-  try {
-    const m = defaultModelFor('codex');
-    const r = await api('/api/conversation/new', { folder, modelKey: m?.key, effort: chooseEffort(m) });
-    await loadState(false);
-    await openConversation(r.key, { isNew: true });
-  } catch (e) { fail(e); }
+  const agents = availableAgents();
+  let agent = agents.find((a) => a.id === (opts.agent || settings().defaultAgent))?.id || agents[0]?.id;
+  if (!agent) { toast(t('accounts'), true); openSettings('accounts'); return; }
+  const cards = h('div', { class: 'agent-cards' });
+  const drawCards = async () => cards.replaceChildren(...await Promise.all(agents.map(async (a) => {
+    const [ik, fb] = agentIconName(a.id);
+    return h('button', { class: `agent-card ${a.id === agent ? 'on' : ''}`, type: 'button', onclick: () => { agent = a.id; drawCards(); },
+      html: `${await toolIcon(ik, fb)}<span><strong>${esc(a.label)}</strong><small>${esc(a.cap.files ? t('canEdit') : t('chatOnly'))}</small></span>` });
+  })));
+  await drawCards();
+  const title = h('input', { class: 'input', placeholder: t('untitled') });
+  const ctx = h('textarea', { class: 'input', rows: 5, placeholder: 'e.g. Optical bench X1191 — 5 MP camera, 3.45 µm pixels. Goal: focal length within ±0.5 %.' });
+  const ins = h('textarea', { class: 'input', rows: 5, placeholder: 'e.g. Explain before acting. Use MATLAB. Report values with uncertainty.' });
+  const mem = h('input', { type: 'checkbox' });
+  const sync = () => { if ((ctx.value.trim() || ins.value.trim()) && !mem.dataset.touched) mem.checked = true; };
+  ctx.addEventListener('input', sync); ins.addEventListener('input', sync); mem.addEventListener('change', () => { mem.dataset.touched = '1'; });
+  const go = async () => {
+    btn.disabled = true;
+    try {
+      const m = defaultModelFor(agent);
+      const r = await api('/api/conversation/new', { agent, folder, title: title.value.trim() || undefined, modelKey: m?.key, effort: chooseEffort(m) });
+      patchSettings({ defaultAgent: agent }, true);
+      await api('/api/conversation/memory-setup', { key: r.key, enable: mem.checked, title: title.value.trim(), context: ctx.value, instructions: ins.value });
+      dlg.close();
+      await loadState(false);
+      await openConversation(r.key, { quiet: true });
+      if (opts.prompt && $.input) { $.input.value = opts.prompt; $.input.dispatchEvent(new Event('input')); }
+      setTimeout(() => $.input?.focus(), 60);
+    } catch (e) { btn.disabled = false; fail(e); }
+  };
+  const btn = h('button', { class: 'btn primary', onclick: go }, t('create'));
+  const dlg = modal({ title: t('newChatTitle'), cls: 'mid', body: h('div', {},
+      h('div', { class: 'help' }, folder),
+      h('div', { class: 'field' }, h('span', {}, t('chooseAI')), cards),
+      field(t('titleOptional'), title),
+      h('details', { class: 'mem-details', open: (settings().uiMode || 'simple') === 'pro' ? true : null }, h('summary', {}, t('memSetupTitle')),
+        h('p', { class: 'help' }, t('memSetupIntro')), field(t('contextBox'), ctx), field(t('instructionsBox'), ins),
+        h('label', { class: 'check' }, mem, h('span', {}, t('withMemory'))))),
+    foot: [h('button', { class: 'btn', onclick: () => dlg.close() }, t('cancel')), btn] });
+  setTimeout(() => title.focus(), 40);
 }
 
 function toggleSidebar(hidden) { patchSettings({ sidebarHidden: hidden }); $.body.classList.toggle('side-hidden', hidden); renderMain(); }
@@ -415,6 +474,7 @@ function chooseEffort(model, prefer) {
 
 // ------------------------------------------------------------------ conversation
 async function openConversation(key, { quiet = false, limit, isNew = false, focusText } = {}) {
+  S.project = null;
   try {
     const data = await api('/api/conversation' + q({ key, ...(limit ? { limit } : {}) }));
     const keepCompose = quiet && S.conv?.key === key;
@@ -550,6 +610,7 @@ async function openMemoryWorkspace() {
 function renderMain() {
   const hidden = !!settings().sidebarHidden;
   $.body.classList.toggle('side-hidden', hidden);
+  if (!S.conv && S.project) return renderProject(hidden);
   if (!S.conv) return renderWelcome(hidden);
   const r = S.conv.record;
   const showBtn = hidden ? ib('sidebarOpen', t('showFolders'), () => toggleSidebar(false)) : null;
@@ -609,6 +670,72 @@ function inlineRename(titleEl) {
   inp.addEventListener('blur', () => done(true));
 }
 
+// ------------------------------------------------------------------ project hub: everything about one folder in one place
+async function openProject(folder) {
+  S.conv = null; S.project = { folder, data: null, sub: '', preview: null };
+  patchSettings({ activeConversation: null });
+  renderSidebar(); renderMain();
+  try { S.project.data = await api('/api/project' + q({ folder })); S.project.files = S.project.data.files; } catch (e) { S.project.error = e.message; }
+  if (S.project?.folder === folder) renderMain();
+}
+
+function renderProject(hidden) {
+  const P = S.project, d = P.data;
+  const head = h('div', { class: 'conv-head' }, hidden ? ib('sidebarOpen', t('showFolders'), () => toggleSidebar(false)) : null,
+    h('div', { class: 'conv-title' }, h('h1', {}, d?.name || P.folder.split(/[\\/]/).filter(Boolean).pop()), h('div', { class: 'loc' }, P.folder)),
+    h('button', { class: 'btn primary', onclick: () => newConversation(P.folder), html: icon('chatPlus') + t('newChat') }),
+    ib('folderOpen', t('openInExplorer'), () => api('/api/reveal', { path: P.folder }).catch(fail)),
+    S.sum.tools.vscode.enabled ? ib('vscode', 'VS Code', () => api('/api/tools/vscode', { folder: P.folder }).catch(fail)) : null,
+    S.sum.tools.matlab.enabled ? ib('matlab', 'MATLAB', () => api('/api/tools/matlab', { folder: P.folder }).then((r) => toast(`MATLAB ${r.release}`)).catch(fail)) : null,
+    S.sum.tools.git.enabled ? ib('branch', t('gitPanel'), () => toggleGit()) : null);
+  const body = h('div', { class: 'stream' }, h('div', { class: 'hub' }));
+  const grid = body.firstChild;
+  if (P.error) grid.append(h('div', { class: 'errorbox' }, P.error));
+  else if (!d) grid.append(h('div', { class: 'help' }, '…'));
+  else {
+    const convCard = h('section', { class: 'card hub-convs' }, h('h3', { html: icon('chat') + esc(t('conversations')) + ` <span class="badge">${d.conversations.length}</span>` }),
+      d.conversations.length ? h('div', { class: 'list' }, ...d.conversations.slice(0, 30).map((c) => h('button', { class: 'li hub-link', onclick: () => openConversation(c.key) },
+        h('span', { html: icon(c.running ? 'spark' : 'chat') }), h('div', { class: 'grow' }, h('div', {}, c.title), h('div', { class: 'sub' }, `${S.sum.agents[c.agent]?.label || c.agent} · ${fmtTime(c.updatedAt)}`)))))
+        : h('div', { class: 'quickstart' }, h('p', { class: 'help' }, t('emptyFolder')), h('div', { class: 'chips' }, ...allPrompts().slice(0, 4).map((p) => h('button', { class: 'chip', onclick: () => newConversation(P.folder, { prompt: p.text }) }, p.text)))));
+    const memCard = h('section', { class: 'card' }, h('h3', { html: icon('book') + esc(t('sharedContext')) }),
+      h('div', { class: 'inline' },
+        h('button', { class: 'btn', onclick: () => openFolderMemory(P.folder, 'context'), html: icon('fileText') + t('folderContext') + (d.memory.context ? '' : ' +') }),
+        h('button', { class: 'btn', onclick: () => openFolderMemory(P.folder, 'instructions'), html: icon('book') + t('folderInstructions') + (d.memory.instructions ? '' : ' +') })));
+    const gitCard = d.git ? h('section', { class: 'card' }, h('h3', { html: icon('branch') + 'Git' }),
+      h('div', { class: 'gp-branch' }, h('strong', {}, d.git.branch || '—'), d.git.upstream ? h('span', { class: 'badge' }, d.git.upstream) : null, d.git.ahead ? h('span', { class: 'badge' }, `↑${d.git.ahead}`) : null, d.git.behind ? h('span', { class: 'badge' }, `↓${d.git.behind}`) : null),
+      h('p', { class: 'help' }, t('changesCount', { n: d.git.changes })), h('button', { class: 'btn small', onclick: () => openGit() }, t('gitPanel'))) : null;
+    const skillCard = h('section', { class: 'card' }, h('h3', { html: icon('puzzle') + esc(t('skillsHere')) }),
+      d.skills.length ? h('div', { class: 'chips' }, ...d.skills.map((n) => h('span', { class: 'chip static' }, n))) : h('p', { class: 'help' }, '—'),
+      h('button', { class: 'btn small', onclick: () => openAddons('skills', P.folder), html: icon('plus') + t('addSkill') }));
+    const filesCard = h('section', { class: 'card hub-files' }, h('h3', { html: icon('folder') + esc(t('files')) }), renderFiles());
+    const readme = h('section', { class: 'card hub-readme' }, h('h3', { html: icon('fileText') + 'README' }), d.readme ? h('div', { class: 'msg-agent', html: renderMarkdown(d.readme) }) : h('p', { class: 'help' }, t('noReadme')));
+    grid.append(convCard, filesCard, memCard, skillCard, gitCard, readme);
+  }
+  $.main.replaceChildren(head, body);
+}
+
+function renderFiles() {
+  const P = S.project, f = P.files;
+  const wrap = h('div');
+  if (!f) return wrap;
+  const go = async (sub) => { try { P.files = await api('/api/project/files' + q({ folder: P.folder, sub })); P.preview = null; renderMain(); } catch (e) { fail(e); } };
+  const rel = f.rel || '';
+  wrap.append(h('div', { class: 'files-path' }, rel ? h('button', { class: 'btn small', onclick: () => go(rel.split(/[\\/]/).slice(0, -1).join('/')), html: icon('chevron', 'rot180') + t('up') }) : null, h('code', {}, rel || '.')),
+    h('div', { class: 'list files-list' }, ...f.entries.slice(0, 300).map((e) => h('button', { class: 'li hub-link', onclick: async () => {
+      if (e.dir) return go(rel ? `${rel}/${e.name}` : e.name);
+      try { P.preview = await api('/api/project/file' + q({ folder: P.folder, file: e.path })); renderMain(); } catch (err) { fail(err); }
+    } }, h('span', { html: icon(e.dir ? 'folder' : 'file') }), h('div', { class: 'grow' }, e.name), h('span', { class: 'sub' }, e.dir ? '' : `${e.size < 1024 ? e.size + ' B' : Math.round(e.size / 1024) + ' KB'} · ${fmtTime(e.mtime)}`)))));
+  if (P.preview) {
+    const pv = P.preview;
+    const ext = (pv.path.split('.').pop() || '').toLowerCase();
+    wrap.append(h('div', { class: 'codeblock' }, h('div', { class: 'codebar' }, h('span', {}, pv.path.split(/[\\/]/).pop()),
+      S.sum.tools.vscode.enabled ? h('button', { class: 'copy', onclick: () => api('/api/tools/vscode', { folder: P.folder, file: pv.path }).catch(fail) }, 'VS Code') : null),
+      pv.text != null ? (ext === 'md' ? h('div', { class: 'msg-agent', style: { padding: '8px 12px' }, html: renderMarkdown(pv.text) }) : h('pre', { html: highlightCode(pv.text.slice(0, 200000), ext) }))
+        : h('p', { class: 'help', style: { padding: '8px 12px' } }, pv.binary ? t('binaryFile') : t('tooLargeFile'))));
+  }
+  return wrap;
+}
+
 function renderWelcome(hidden) {
   const cx = S.sum.agents.codex;
   const recent = (S.sum.conversations || []).filter((c) => !c.archived).slice(0, 6);
@@ -637,6 +764,8 @@ function renderStream(force) {
   if (S.conv.offset > 0) $.streamInner.append(h('button', { class: 'btn small', style: { alignSelf: 'center' }, onclick: loadEarlier, html: icon('history') + `${esc(t('showEarlier'))} (${S.conv.offset})` }));
   for (const it of S.conv.items) { const el = itemEl(it); if (el) $.streamInner.append(el); }
   for (const p of S.conv.pending || []) $.streamInner.append(approvalEl(p));
+  if (!S.conv.items.length && !S.conv.running) $.streamInner.append(h('div', { class: 'quickstart' }, h('div', { class: 'help' }, t('quickStart')),
+    h('div', { class: 'chips' }, ...allPrompts().slice(0, 6).map((p) => h('button', { class: 'chip', onclick: () => usePrompt(p.text) }, p.text)))));
   if (S.conv.running) $.streamInner.append(h('div', { class: 'thinking', id: 'thinking', html: '<span class="dots"><span></span><span></span><span></span></span>' + esc(t('running')) }));
   if (stick) requestAnimationFrame(() => scrollBottom(true));
 }
@@ -773,8 +902,29 @@ function renderComposer() {
   const modes = S.sum.actionModes || ['default', 'ask', 'project', 'readonly', 'full'];
   const modeSel = h('select', { class: 'sel', 'data-tip': t(`modeHelp.${S.compose.mode}`), 'data-tip-pos': 'up', onchange: (e) => { S.compose.mode = e.target.value; modeSel.dataset.tip = t(`modeHelp.${e.target.value}`); api('/api/conversation/options', { key: S.conv.key, actionMode: e.target.value }).catch(fail); } },
     ...modes.map((m) => h('option', { value: m, selected: m === S.compose.mode }, `${m === 'full' ? '⚠ ' : ''}${t('mode.' + m)}`)));
+  const cap = S.sum.capabilities?.[r.agent] || {};
+  if (!cap.files) modeSel.classList.add('hidden');
   const mem = S.conv.memory || {};
-  const memBtn = (iconName, tip, file, folderKind) => ib(iconName, tip, () => file ? openMemoryEditor(file, tip) : folderKind ? openFolderMemory(r.cwd, folderKind) : toast('—'), { attrs: { 'data-tip-pos': 'up' } });
+  const memBtn = (iconName, tip, file, folderKind) => ib(iconName, tip, () => file ? openMemoryEditor(file, tip) : folderKind ? openFolderMemory(r.cwd, folderKind) : toast('—'), { attrs: { 'data-tip-pos': 'up' }, class: 'pro-only' });
+  // ---- attachments: button, drag & drop, paste
+  S.attach ||= {};
+  const list = (S.attach[S.conv.key] ||= []);
+  const chips = h('div', { class: 'attach-chips' });
+  const drawChips = () => chips.replaceChildren(...list.map((a, i) => h('span', { class: 'attach-chip' }, h('span', { html: icon(a.kind === 'image' ? 'eye' : 'file') }), a.uploading ? `${a.name} — ${t('uploading')}` : a.name,
+    h('button', { 'data-tip': t('removeAttachment'), html: icon('close'), onclick: () => { list.splice(i, 1); drawChips(); } }))));
+  const addFiles = async (files) => {
+    for (const f of [...files].slice(0, 10)) {
+      const entry = { name: f.name, kind: f.type.startsWith('image/') ? 'image' : 'text', uploading: true }; list.push(entry); drawChips();
+      try {
+        const data = await new Promise((res, rej) => { const rd = new FileReader(); rd.onload = () => res(String(rd.result).split(',')[1] || ''); rd.onerror = rej; rd.readAsDataURL(f); });
+        Object.assign(entry, await api('/api/attachments', { key: S.conv.key, name: f.name || 'pasted.png', data }), { uploading: false });
+      } catch (e) { list.splice(list.indexOf(entry), 1); fail(e); }
+      drawChips();
+    }
+  };
+  const fileInput = h('input', { type: 'file', multiple: true, style: { display: 'none' }, onchange: (e) => { addFiles(e.target.files); e.target.value = ''; } });
+  ta.addEventListener('paste', (e) => { const fl = [...(e.clipboardData?.files || [])]; if (fl.length) { e.preventDefault(); addFiles(fl); } });
+  drawChips();
   const linkCount = (mem.links || []).length;
   $.sendBtn = h('button', { class: `sendbtn ${S.conv.running ? 'stop' : ''}`, 'data-tip': S.conv.running ? t('stop') : t('send'), 'data-tip-pos': 'up', html: icon(S.conv.running ? 'stop' : 'send'), onclick: () => (S.conv.running ? stopTurn() : send()) });
 
@@ -795,19 +945,34 @@ function renderComposer() {
     g('more', t('gitPanel'), () => toggleGit())) : null;
 
   const banner = composerBanner();
-  return h('div', { class: 'composer' }, h('div', { class: 'composer-inner' }, banner,
-    h('div', { class: 'inputbox' }, ta,
+  const box = h('div', { class: 'inputbox' }, chips, ta,
       h('div', { class: 'controls' },
+        ib('paperclip', t('attach'), () => fileInput.click(), { attrs: { 'data-tip-pos': 'up' } }), fileInput,
         modelSel, effortSel, modeSel,
-        h('span', { class: 'sep' }),
+        ib('spark', t('prompts'), (e) => promptMenu(e.currentTarget), { attrs: { 'data-tip-pos': 'up' } }),
+        h('span', { class: 'sep pro-only' }),
         memBtn('fileText', t('folderContext'), mem.folder?.context, 'context'),
         memBtn('book', t('folderInstructions'), mem.folder?.instructions, 'instructions'),
         memBtn('chat', t('convContext'), mem.conversation?.context),
         memBtn('list', t('convInstructions'), mem.conversation?.instructions),
-        ib('link', `${t('linkContexts')}${linkCount ? ` (${linkCount})` : ''}`, openLinkDialog, { class: linkCount ? 'active' : '', attrs: { 'data-tip-pos': 'up' } }),
+        ib('link', `${t('linkContexts')}${linkCount ? ` (${linkCount})` : ''}`, openLinkDialog, { class: `pro-only ${linkCount ? 'active' : ''}`, attrs: { 'data-tip-pos': 'up' } }),
         h('span', { class: 'grow' }),
-        $.sendBtn)),
-    gitbar));
+        $.sendBtn));
+  box.addEventListener('dragover', (e) => { if (e.dataTransfer?.types?.includes('Files')) { e.preventDefault(); box.classList.add('drop'); } });
+  box.addEventListener('dragleave', () => box.classList.remove('drop'));
+  box.addEventListener('drop', (e) => { if (e.dataTransfer?.files?.length) { e.preventDefault(); box.classList.remove('drop'); addFiles(e.dataTransfer.files); } });
+  return h('div', { class: 'composer' }, h('div', { class: 'composer-inner' }, banner, box, gitbar ? h('div', { class: 'pro-only' }, gitbar) : null));
+}
+
+// ------------------------------------------------------------------ prompts (quick start)
+function allPrompts() {
+  const builtIn = ['p_explain', 'p_review', 'p_tests', 'p_plan', 'p_summarize', 'p_doc'].map((k) => ({ text: t(k), builtIn: true }));
+  return [...(settings().prompts || []).map((text) => ({ text })), ...builtIn];
+}
+function usePrompt(text) { if (!$.input) return; $.input.value = $.input.value ? `${$.input.value}\n${text}` : text; $.input.dispatchEvent(new Event('input')); $.input.focus(); }
+function promptMenu(anchor) {
+  showMenu(anchor, [...allPrompts().map((p) => ({ label: p.text.length > 70 ? p.text.slice(0, 68) + '…' : p.text, icon: p.builtIn ? 'spark' : 'tag', run: () => usePrompt(p.text) })), '-',
+    { label: t('promptAdd'), icon: 'plus', run: async () => { const v = await ask({ title: t('promptAdd'), label: t('promptText') }); if (v) patchSettings({ prompts: [v, ...(settings().prompts || [])].slice(0, 100) }, true); } }]);
 }
 
 /**
@@ -842,7 +1007,9 @@ async function send() {
   const doneBefore = S.turnsDone[key] || 0;
   S.phase[key] = 'queued'; renderStatus();
   try {
-    const r = await api('/api/conversation/send', { key, text, modelKey: S.compose.modelKey, effort: S.compose.effort, actionMode: S.compose.mode });
+    const attachments = (S.attach?.[key] || []).filter((a) => !a.uploading && a.path).map(({ path, kind }) => ({ path, kind }));
+    const r = await api('/api/conversation/send', { key, text, modelKey: S.compose.modelKey, effort: S.compose.effort, actionMode: S.compose.mode, attachments });
+    if (S.attach) S.attach[key] = [];
     clearTimeout(draftTimer); store.set('draft.' + key, ''); S.conv.draft = ''; $.input.value = ''; $.input.style.height = 'auto';
     // A fast turn can complete before this response arrives: only mark running if it has not finished yet.
     const finished = (S.turnsDone[key] || 0) > doneBefore;
@@ -1016,7 +1183,8 @@ async function jiraAction() {
 
 // ------------------------------------------------------------------ settings dialog
 async function openSettings(tab = 'general', focusTool) {
-  const tabs = [['general', 'gear'], ['models', 'cpu'], ['keys', 'key'], ['agents', 'bot'], ['tools', 'tool'], ['skills', 'puzzle'], ['configToml', 'fileText'], ['about', 'info']];
+  const tabs = [['general', 'gear'], ['accounts', 'bot'], ['appearance', 'eye'], ['models', 'cpu'], ['keys', 'key'], ['tools', 'tool'], ['skills', 'puzzle'], ['configToml', 'fileText'], ['about', 'info']];
+  if (tab === 'agents') tab = 'accounts';
   const nav = h('nav');
   const section = h('section');
   const show = async (name) => {
@@ -1037,6 +1205,113 @@ const checkbox = (label, checked, onchange) => h('label', { class: 'check' }, h(
 const sw = (checked, onchange, tip) => h('label', { class: 'switch', 'data-tip': tip }, h('input', { type: 'checkbox', checked, onchange: (e) => onchange(e.target.checked) }), h('span'));
 const select = (opts, value, onchange) => h('select', { class: 'input', onchange: (e) => onchange(e.target.value) }, ...opts.map(([v, l]) => h('option', { value: v, selected: v === value }, l)));
 const input = (value, onchange, attrs = {}) => h('input', { class: 'input', value: value ?? '', spellcheck: 'false', onchange: (e) => onchange(e.target.value), ...attrs });
+function readFileAsDataUrl(accept) {
+  return new Promise((resolve) => {
+    const inp = h('input', { type: 'file', accept, style: { display: 'none' } });
+    inp.onchange = () => { const f = inp.files[0]; if (!f) return resolve(null); const r = new FileReader(); r.onload = () => resolve({ name: f.name, data: String(r.result).split(',')[1] || '' }); r.readAsDataURL(f); };
+    document.body.append(inp); inp.click(); setTimeout(() => inp.remove(), 60_000);
+  });
+}
+
+/** Add or edit an API service: choose a preset, paste the key, test. */
+function providerDialog(existing) {
+  const presets = S.sum.presets || [];
+  const preset = select(presets.map((p) => [p.preset, p.label]), existing?.preset || 'openai', (v) => fill(v));
+  const label = h('input', { class: 'input' }), baseUrl = h('input', { class: 'input', spellcheck: 'false' }), keyName = h('input', { class: 'input', spellcheck: 'false' });
+  const key = h('input', { class: 'input', type: 'password', autocomplete: 'new-password', placeholder: existing?.keySaved ? '•••••• (' + t('keySaved') + ')' : '' });
+  const models = h('input', { class: 'input', spellcheck: 'false', value: (existing?.models || []).join(', ') });
+  const link = h('a', { target: '_blank', rel: 'noopener noreferrer' });
+  const result = h('div', { class: 'help' });
+  const fill = (id) => { const p = presets.find((x) => x.preset === id); if (!p) return; if (!existing || existing.preset !== id) { label.value = p.label; baseUrl.value = p.baseUrl; keyName.value = p.keyName || ''; } link.href = p.site || '#'; link.textContent = p.site ? `${t('getKey')} ↗` : ''; };
+  if (existing) { label.value = existing.label; baseUrl.value = existing.baseUrl; keyName.value = existing.keyName || ''; }
+  fill(existing?.preset || 'openai');
+  const save = async () => {
+    btn.disabled = true; result.textContent = '…';
+    try {
+      const r = await api('/api/providers/save', { id: existing?.id, preset: preset.querySelector('select')?.value || preset.value, label: label.value, baseUrl: baseUrl.value, keyName: keyName.value, key: key.value || undefined, models: models.value.split(',').map((x) => x.trim()).filter(Boolean) });
+      key.value = '';
+      if (r.test.ok) { result.textContent = `✓ ${r.test.models} models — ${r.test.sample.join(', ')}`; await loadState(false); setTimeout(() => { m.close(); openSettings('accounts'); }, 900); }
+      else { result.textContent = `✕ ${r.test.error}`; result.style.color = 'var(--danger)'; await loadState(false); }
+    } catch (e) { result.textContent = e.message; result.style.color = 'var(--danger)'; }
+    btn.disabled = false;
+  };
+  const btn = h('button', { class: 'btn primary', onclick: save }, `${t('save')} & ${t('test')}`);
+  const m = modal({ title: existing ? existing.label : t('addProvider'), cls: 'mid', body: h('div', {}, field(t('service'), preset), link, field(t('name'), label), field(t('baseUrlLabel'), baseUrl), field(t('keyName'), keyName), field(t('apiKey'), key), field(t('modelsOptional'), models), result),
+    foot: [h('button', { class: 'btn', onclick: () => m.close() }, t('cancel')), btn] });
+}
+
+// ------------------------------------------------------------------ add-ons (agents, gateways, connectors, skill packs)
+async function installAddon(id, extra = {}) {
+  try { const r = await api('/api/addons/install', { id, ...extra }); if (r.opened) toast(r.opened); else toast(`${t('install')}…`); return r; } catch (e) { fail(e); return null; }
+}
+
+async function openAddons(category = 'agents', folder) {
+  let info;
+  try { info = await api('/api/addons'); } catch (e) { fail(e); return; }
+  const cats = ['agents', 'gateways', 'connectors', 'skills'];
+  const nav = h('nav'), section = h('section'), log = h('div', { class: 'jobs' });
+  const show = (cat) => {
+    category = cat;
+    nav.querySelectorAll('button').forEach((b) => b.classList.toggle('on', b.dataset.cat === cat));
+    section.replaceChildren(h('div', { class: 'cards' }, ...info.catalog.filter((c) => c.category === cat).map((c) => addonCard(c, folder))), h('h3', { style: { marginTop: '16px' } }, t('jobs')), log);
+    if (cat === 'skills') section.prepend(skillBox(folder));
+  };
+  for (const c of cats) nav.append(h('button', { 'data-cat': c, onclick: () => show(c), html: icon({ agents: 'bot', gateways: 'globe', connectors: 'plug', skills: 'puzzle' }[c]) + `<span>${esc(t('cat_' + c))}</span>` }));
+  const drawJobs = () => log.replaceChildren(...(S.jobs || []).slice().reverse().map((j) => h('details', { class: 'work', open: j.status === 'running' || j.status === 'failed' ? true : null },
+    h('summary', { html: `${icon(j.status === 'done' ? 'check' : j.status === 'failed' ? 'warn' : 'refresh')}<span class="cmd">${esc(j.title)}</span><span class="exit ${j.status === 'done' ? 'ok' : j.status === 'failed' ? 'bad' : 'run'}">${esc(j.status)}</span>` }),
+    h('pre', { class: 'term' }, j.log || '…'))));
+  S.jobs = info.jobs; S.onJobs = drawJobs; drawJobs();
+  const m = modal({ title: t('addons'), cls: 'wide', body: h('div', { class: 'settings' }, nav, section), onClose: () => { S.onJobs = null; loadState(false); } });
+  S.addonsRefresh = async () => { try { info = await api('/api/addons'); if (document.body.contains(section)) show(category); } catch { /* */ } };
+  show(category);
+  void m;
+}
+
+function addonCard(c, folder) {
+  const status = c.installed === true ? h('span', { class: 'badge ok' }, t('installed')) : c.running ? h('span', { class: 'badge ok' }, t('running')) : null;
+  const tokenInput = c.mcp?.tokenName ? h('input', { class: 'input', type: 'password', autocomplete: 'new-password', placeholder: `${t('token')} (${c.mcp.tokenName})` }) : null;
+  const action = c.skills ? h('button', { class: 'btn small', onclick: () => { const box = document.getElementById('skill-src'); if (box) { box.value = c.skills; box.dispatchEvent(new Event('change')); } } }, t('open'))
+    : h('button', { class: 'btn primary small', onclick: async () => {
+      let f = folder;
+      if (c.mcp?.needsFolder && !f) { f = await pickFolder(); if (!f) return; }
+      await installAddon(c.id, { token: tokenInput?.value || undefined, folder: f });
+    } }, c.external ? t('open') + ' ↗' : c.start && c.installed ? t('start') : t('install'));
+  return h('div', { class: 'card' },
+    h('div', { class: 'card-head', html: `${icon({ agents: 'bot', gateways: 'globe', connectors: 'plug', skills: 'puzzle' }[c.category])}<h4>${esc(c.name)}</h4>` }, status),
+    h('p', { class: 'help' }, c.description), h('div', { class: 'help' }, c.vendor, ' · ', h('a', { href: c.site, target: '_blank', rel: 'noopener noreferrer' }, new URL(c.site).hostname)),
+    c.mcp?.tokenHelp ? h('div', { class: 'help' }, h('a', { href: c.mcp.tokenHelp, target: '_blank', rel: 'noopener noreferrer' }, `${t('getKey')} ↗`)) : null,
+    tokenInput, h('div', { style: { marginTop: '8px' } }, action));
+}
+
+/** Skill installer: paste a GitHub link (or choose a pack) → see the skills inside → tick → install. */
+function skillBox(folder) {
+  const src = h('input', { class: 'input', id: 'skill-src', placeholder: 'https://github.com/owner/repo  ·  owner/repo  ·  C:\\path\\to\\skill', spellcheck: 'false' });
+  const scope = select([['global', t('scopeGlobal')], ...(folder || S.conv?.record?.cwd || S.selFolder ? [['folder', `${t('scopeFolder')} — ${folder || S.conv?.record?.cwd || S.selFolder}`]] : [])], folder ? 'folder' : 'global', () => {});
+  const list = h('div', { class: 'list' });
+  const out = h('div', { class: 'help' });
+  let found = [];
+  const preview = async () => {
+    const v = src.value.trim(); if (!v) return;
+    list.replaceChildren(h('div', { class: 'li help' }, '…'));
+    if (!/github\.com|^[\w.-]+\/[\w.-]+$/.test(v)) { list.replaceChildren(h('div', { class: 'li help' }, v)); found = null; return; }
+    try { const r = await api('/api/skills/preview', { source: v }); found = r.skills; list.replaceChildren(...(found.length ? found.map((sk) => h('label', { class: 'li check', style: { margin: 0 } }, h('input', { type: 'checkbox', value: sk.name, checked: found.length <= 3 }), h('div', { class: 'grow' }, h('div', {}, sk.name), h('div', { class: 'sub' }, sk.description)))) : [h('div', { class: 'li help' }, t('noResults'))])); }
+    catch (e) { list.replaceChildren(h('div', { class: 'li help' }, e.message)); }
+  };
+  src.addEventListener('change', preview);
+  src.addEventListener('keydown', (e) => { if (e.key === 'Enter') preview(); });
+  return h('div', { class: 'card', style: { marginBottom: '14px' } }, h('div', { class: 'card-head', html: icon('puzzle') + `<h4>${esc(t('addSkill'))}</h4>` }),
+    field(t('installFrom'), src), h('button', { class: 'btn small', onclick: preview }, t('preview')), h('div', { class: 'help', style: { marginTop: '8px' } }, t('pickSkills')), list, field(t('scope'), scope),
+    h('button', { class: 'btn primary', onclick: async (e) => {
+      const select_ = [...list.querySelectorAll('input:checked')].map((i) => i.value);
+      e.currentTarget.disabled = true;
+      try {
+        const r = await api('/api/skills/install', { source: src.value.trim(), scope: scope.querySelector('select')?.value || 'global', folder: folder || S.conv?.record?.cwd || S.selFolder, select: found === null ? undefined : select_ });
+        out.textContent = r.kind === 'plugin' ? r.message : r.results.map((x) => `${x.status === 'installed' ? '✓' : '•'} ${x.name} (${x.status})`).join('   ');
+      } catch (err) { out.textContent = err.message; }
+      e.currentTarget.disabled = false;
+    } }, t('installSelected')), out);
+}
+
 function readFileAsText(accept) {
   return new Promise((resolve) => {
     const inp = h('input', { type: 'file', accept, style: { display: 'none' } });
@@ -1053,6 +1328,8 @@ const SETTINGS = {
       field(t('language'), select(Object.entries(LANGS).map(([k, v]) => [k, v.name]), getLang(), (v) => changeLang(v))),
       field(t('defaultMode'), select((S.sum.actionModes || []).map((m) => [m, t('mode.' + m)]), s.defaultActionMode || 'ask', (v) => patchSettings({ defaultActionMode: v }, true)), t(`modeHelp.${s.defaultActionMode || 'ask'}`)),
       field(t('openMode'), select([['app', t('openApp')], ['browser', t('openBrowser')]], s.openMode || 'app', (v) => patchSettings({ openMode: v }, true))),
+      field(t('uiMode'), select([['simple', t('simpleMode')], ['pro', t('proMode')]], s.uiMode || 'simple', (v) => { patchSettings({ uiMode: v }, true); document.body.classList.toggle('mode-simple', v === 'simple'); renderAll(); }), t('simpleHelp')),
+      checkbox(t('quitOnClose'), s.quitOnWindowClose !== false, (v) => patchSettings({ quitOnWindowClose: v }, true)),
       checkbox(t('syncConfig'), s.syncConfig !== false, (v) => patchSettings({ syncConfig: v }, true)),
       checkbox(t('transcriptCopy'), s.transcriptCopy !== false, (v) => patchSettings({ transcriptCopy: v }, true))];
   },
@@ -1083,6 +1360,50 @@ const SETTINGS = {
     const reload = async () => { await loadState(false); draw(); };
     draw();
     return wrap;
+  },
+
+  async accounts() {
+    const info = await api('/api/providers');
+    const cli = await Promise.all(info.cli.map(async (a) => {
+      const [ik, fb] = agentIconName(a.id);
+      const addon = { codex: 'codex-cli', claude: 'claude-code' }[a.id];
+      return h('div', { class: 'card' },
+        h('div', { class: 'card-head', html: `${await toolIcon(ik, fb)}<h4>${esc(a.label)}</h4><span class="agent-pill"><span class="dot ${a.state}"></span>${esc(a.installed ? t(a.state) || a.state : t('notInstalled'))}</span>` }),
+        h('p', { class: 'help' }, t('canEdit') + '. ' + t('signInHint')),
+        a.error && a.installed ? h('div', { class: 'help', style: { color: 'var(--danger)' } }, a.error) : null,
+        !a.installed ? h('button', { class: 'btn primary small', onclick: () => installAddon(addon), html: icon('download') + t('install') }) : null,
+        field(t('agentPath'), input((settings().agentBins || {})[a.id] || '', (v) => patchSettings({ agentBins: { ...(settings().agentBins || {}), [a.id]: v } }, true), { placeholder: a.id })),
+        a.id === 'codex' ? h('div', { class: 'inline' }, h('button', { class: 'btn small', onclick: reconnect, html: icon('refresh') + t('reconnect') }), checkPanel('codex')) : null);
+    }));
+    const apiCards = info.api.map((p) => h('div', { class: 'li' }, h('span', { html: icon('api') }),
+      h('div', { class: 'grow' }, h('div', {}, p.label), h('div', { class: 'sub' }, `${p.baseUrl} · ${p.keyName ? (p.keySaved ? t('keySaved') : t('noKey')) : '—'}${p.models?.length ? ' · ' + p.models.join(', ') : ''}`)),
+      h('button', { class: 'btn small', onclick: async (e) => { e.currentTarget.disabled = true; try { const r = await api('/api/providers/test', { id: p.id }); toast(`${p.label}: ✓ ${r.models} — ${r.sample.join(', ')}`); } catch (err) { fail(err); } e.currentTarget.disabled = false; } }, t('test')),
+      h('button', { class: 'btn small', onclick: () => providerDialog(p) }, t('edit')),
+      h('button', { class: 'btn small danger', onclick: async () => { if (await confirmBox({ title: t('remove'), text: p.label, danger: true })) { await api('/api/providers/remove', { id: p.id }).catch(fail); await loadState(false); openSettings('accounts'); } } }, t('remove'))));
+    return [h('h3', {}, t('cliAgents')), h('div', { class: 'cards' }, ...cli),
+      h('h3', { style: { marginTop: '20px' } }, t('apiProviders')),
+      h('div', { class: 'list' }, ...(apiCards.length ? apiCards : [h('div', { class: 'li help' }, '—')])),
+      h('div', { class: 'inline', style: { marginTop: '10px' } }, h('button', { class: 'btn primary', onclick: () => providerDialog(), html: icon('plus') + t('addProvider') }),
+        h('button', { class: 'btn', onclick: () => openAddons('gateways'), html: icon('puzzle') + 'OmniRoute / Ollama…' }))];
+  },
+
+  async appearance() {
+    const tools = ['vscode', 'matlab', 'git', 'bitbucket', 'jira', 'codex', 'claude'];
+    const names = { vscode: 'VS Code', matlab: 'MATLAB', git: 'Git', bitbucket: 'Bitbucket', jira: 'Jira', codex: 'Codex / OpenAI', claude: 'Claude' };
+    const out = h('div', { class: 'help' });
+    const rows = await Promise.all(tools.map(async (tl) => h('div', { class: 'li' }, h('span', { class: 'iconbox', html: await toolIcon(tl, agentIconName(tl)[1] === 'api' ? tl : agentIconName(tl)[1]) }), h('div', { class: 'grow' }, names[tl]),
+      h('button', { class: 'btn small', onclick: async () => { const f = await readFileAsDataUrl('image/*,.svg,.ico'); if (!f) return; try { const r = await api('/api/icons/upload', { tool: tl, name: f.name, data: f.data }); S.sum.icons = r.icons; setLogos(S.sum.logos, S.sum.icons, TOKEN); renderTop(); openSettings('appearance'); } catch (e) { fail(e); } } }, t('upload')),
+      S.sum.icons?.[tl] ? h('button', { class: 'btn small', onclick: async () => { const r = await api('/api/icons/reset', { tool: tl }); S.sum.icons = r.icons; setLogos(S.sum.logos, S.sum.icons, TOKEN); renderTop(); openSettings('appearance'); } }, t('reset')) : null)));
+    return [h('h3', {}, t('appearance')),
+      field(t('theme'), select([['system', t('system')], ['light', t('light')], ['dark', t('dark')]], settings().theme || 'system', (v) => { patchSettings({ theme: v }, true); applyTheme(); renderTop(); })),
+      field(t('uiMode'), select([['simple', t('simpleMode')], ['pro', t('proMode')]], settings().uiMode || 'simple', (v) => { patchSettings({ uiMode: v }, true); document.body.classList.toggle('mode-simple', v === 'simple'); renderAll(); }), t('simpleHelp')),
+      h('h3', { style: { marginTop: '18px' } }, t('officialIcons')), h('p', { class: 'help' }, t('fetchIconsHelp')),
+      h('button', { class: 'btn primary', html: icon('download') + t('fetchIcons'), onclick: async (e) => {
+        e.currentTarget.disabled = true; out.textContent = '…';
+        try { const r = await api('/api/icons/fetch', {}); S.sum.icons = r.icons; setLogos(S.sum.logos, S.sum.icons, TOKEN); renderTop(); out.textContent = r.results.map((x) => `${x.ok ? '✓' : '✕'} ${x.tool}${x.ok ? '' : ' — ' + x.error}`).join('   '); setTimeout(() => openSettings('appearance'), 1500); }
+        catch (err) { out.textContent = err.message; }
+      } }), out,
+      h('div', { class: 'list', style: { marginTop: '10px' } }, ...rows)];
   },
 
   async keys() {
@@ -1255,7 +1576,9 @@ function openOnboarding() {
   const steps = [
     () => [h('h3', {}, t('onbLang')), h('div', { class: 'inline' }, ...Object.entries(LANGS).map(([k, v]) => h('button', { class: `btn ${getLang() === k ? 'primary' : ''}`, html: FLAGS[k] + esc(v.name), onclick: () => { changeLang(k); draw(); } }))),
       field(t('theme'), select([['system', t('system')], ['light', t('light')], ['dark', t('dark')]], settings().theme || 'system', (v) => { patchSettings({ theme: v }, true); applyTheme(); renderTop(); }))],
-    () => [h('h3', {}, t('onbAgent')), h('p', { class: 'help' }, t('setupCodex')), checkPanel('codex')],
+    () => [h('h3', {}, t('uiMode')), h('p', { class: 'help' }, t('simpleHelp')), h('div', { class: 'inline' }, ...[['simple', t('simpleMode')], ['pro', t('proMode')]].map(([v, l]) => h('button', { class: `btn ${(settings().uiMode || 'simple') === v ? 'primary' : ''}`, onclick: () => { patchSettings({ uiMode: v }, true); document.body.classList.toggle('mode-simple', v === 'simple'); renderAll(); draw(); } }, l)))],
+    () => [h('h3', {}, t('accounts')), h('p', { class: 'help' }, t('cliAgents')), h('div', { class: 'list' }, ...['codex', 'claude'].map((id) => { const a = S.sum.agents[id]; return h('div', { class: 'li' }, h('span', { class: `dot ${a.state}` }), h('div', { class: 'grow' }, a.label), a.state === 'missing' ? h('button', { class: 'btn small primary', onclick: () => installAddon({ codex: 'codex-cli', claude: 'claude-code' }[id]) }, t('install')) : h('span', { class: 'badge' }, t('installed'))); })),
+      h('p', { class: 'help', style: { marginTop: '10px' } }, t('apiProviders')), h('button', { class: 'btn', onclick: () => providerDialog(), html: icon('plus') + t('addProvider') }), h('p', { class: 'help' }, t('signInHint'))],
     () => [h('h3', {}, t('onbFolder')), h('p', { class: 'help' }, t('welcomeText')), h('button', { class: 'btn primary', html: icon('folderOpen') + t('openFolder'), onclick: openFolderFlow })],
     () => [h('h3', {}, t('onbTools')), ...['vscode', 'matlab', 'git', 'bitbucket', 'jira'].map((id) => checkbox({ vscode: 'VS Code', matlab: 'MATLAB', git: 'Git', bitbucket: 'Bitbucket', jira: 'Jira' }[id], S.sum.tools[id].enabled, (v) => api('/api/tools', { tool: id, patch: { enabled: v } }).then((r) => { S.sum.tools = r.tools; renderTop(); }).catch(fail))), h('p', { class: 'help' }, t('onbDone'))],
   ];
@@ -1330,18 +1653,22 @@ function onEvent(e) {
     case 'warning': toast(e.message); break;
     case 'conversation.updated': softReload(); break;
     case 'server.shutdown': showClosed(); break;
+    case 'job.update': { S.jobs = [...(S.jobs || []).filter((j) => j.id !== e.job.id), e.job]; S.onJobs?.(); if (e.job.status !== 'running') { toast(`${e.job.title}: ${e.job.status}`, e.job.status === 'failed'); S.addonsRefresh?.(); loadState(false); } break; }
+    case 'addons.changed': S.addonsRefresh?.(); break;
     default: break;
   }
 }
 function refreshHeader() { const h1 = $.main.querySelector('.conv-title h1'); if (h1 && S.conv) h1.textContent = S.conv.record.title || t('untitled'); }
 function markRunning(key, v) { const c = S.sum?.conversations.find((x) => x.key === key); if (c) { c.running = v; renderTree(); } }
 
-function showClosed() { es?.close(); document.body.append(h('div', { class: 'fullscreen-msg' }, h('div', {}, h('div', { class: 'mark', style: { margin: '0 auto 12px', width: '48px', height: '48px', borderRadius: '13px', background: 'var(--accent)', color: 'var(--on-accent)', display: 'grid', placeItems: 'center' }, html: icon('logo') }), h('p', {}, t('appClosed'))))); }
+function showClosed() { es?.close(); window.close(); if (document.querySelector('.fullscreen-msg')) return; document.body.append(h('div', { class: 'fullscreen-msg' }, h('div', {}, h('div', { class: 'mark', style: { margin: '0 auto 12px', width: '48px', height: '48px', borderRadius: '13px', background: 'var(--accent)', color: 'var(--on-accent)', display: 'grid', placeItems: 'center' }, html: icon('logo') }), h('p', {}, t('closedWindow'))))); }
 
 // ------------------------------------------------------------------ load & render
 async function loadState(full = true) {
   try { S.sum = await api('/api/state'); } catch (e) { if (e.status === 401) return noToken(); fail(e); return; }
-  setLogos(S.sum.logos);
+  setLogos(S.sum.logos, S.sum.icons, TOKEN);
+  document.title = S.sum.brand.name;
+  document.body.classList.toggle('mode-simple', (settings().uiMode || 'simple') === 'simple');
   if (full) { setLang(settings().lang || 'en'); applyTheme(); }
   renderTop();
   // Rebuild the Explorer only when what it shows changed (rec. 3).

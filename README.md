@@ -1,102 +1,94 @@
-# Codex Projects Management
+# AI Management APP
 
-A desktop workbench for coding agents. It replaces the Codex command window: your projects appear as an
-Explorer-style folder tree, every conversation lives under its working folder, and you chat with the agent,
-approve its actions, manage shared memory and run Git, VS Code, MATLAB and Jira from one place.
+One workbench for working with AI on real projects — for beginners and professionals alike.
+Pick the AI you have an account with, open a project folder, and find everything about that project in one
+window: conversations, files, shared memory, skills, connectors, Git, VS Code, MATLAB and Jira.
 
 © 2026 Jack Salameh. All rights reserved (see `LICENSE`).
 
 ---
 
-## 1. Requirements
+## 1. Which AIs it works with
 
-| Component | Version | Why |
+| Type | Examples | What they can do |
 |---|---|---|
-| Node.js | 22 or newer | Runs the local server (no other npm packages are needed) |
-| Codex CLI | 0.166 or newer (`npm install -g @openai/codex`) | The agent; sign in once with `codex` in a terminal |
-| Optional | Claude Code CLI, Git, VS Code, MATLAB, an MCP server for Jira | Integrations |
+| **AI agents on your computer** | Codex (OpenAI / ChatGPT account), Claude Code (Anthropic account) | Read your files, run commands, edit code — with approvals |
+| **AI services by API key** | OpenAI, Anthropic, Google Gemini, Mistral, OpenRouter, DeepSeek, Groq, xAI, Azure OpenAI | Chat with streaming replies, images, shared memory |
+| **Gateways & local models** | OmniRoute, Ollama, LM Studio, any OpenAI-compatible service | Same as API services, routed through one endpoint or run locally |
 
-Each person runs the app under **their own OS account**: it reads that account's Codex sign-in, conversations
-(`~/.codex`) and stores its own settings (Windows `%APPDATA%\CodexProjectsManagement`, macOS
-`~/Library/Application Support/CodexProjectsManagement`, Linux `~/.config/codex-projects-management`).
-Nothing personal is stored in this folder.
+Add them in **Configuration › Accounts & providers**, or install them in one click from **Add-ons**.
+API keys are stored with the operating system's protection (Windows DPAPI, macOS Keychain, Linux Secret
+Service) and never written into configuration files.
 
-## 2. Start
+## 2. Requirements and start
+
+- **Node.js 22+** (https://nodejs.org). Nothing else is required to start the app.
+- At least one AI: install Codex or Claude Code from *Add-ons* and sign in once in a terminal
+  (`codex` / `claude`), **or** add an API service with its key.
 
 | System | Double-click |
 |---|---|
-| Windows | `Launch (Windows).vbs` (no console) — or `Launch (Windows, with console).cmd` to see errors |
+| Windows | `Launch (Windows).vbs` — or `Launch (Windows, with console).cmd` to see errors |
 | macOS | `launch-macos.command` |
 | Linux | `launch-linux.sh` |
-| Any | `npm start` in a terminal |
+| Any | `npm start` |
 
-The app opens as its own window (Edge/Chrome app mode) or in your browser. Launching it again re-opens the
-running instance. **Try it without touching real data:** `npm run demo` starts a sandbox with sample
-projects and a simulated agent.
+The app opens in its own window. **Closing the window (or the ⏻ button) quits the app and disconnects
+every agent.** A first-time wizard sets language, Simple/Pro mode, accounts, a first folder and tools.
 
-## 3. What it does
+Try it safely first: `npm run demo` opens a sandbox with sample projects and simulated AIs.
 
-- **Explorer** — conversations grouped by their real folders (`D:` › `X1191` › `Distance focal`); new
-  folder / new conversation at any level; ⋯ menu to rename (on disk), archive, trash, restore, erase;
-  drag a conversation onto a folder to move it; archived and trash views.
-- **Chat** — streamed replies, commands with output and exit code, file diffs, tool calls, approval cards
-  (allow / allow for session / decline / cancel). Model, reasoning effort and action mode sit beside Send.
-  Effort choices come from the selected model; changes are written to `config.toml` *before* the message
-  goes out, and the header shows what Codex actually acknowledged plus token usage.
-- **Status** — Queued → Running → Waiting for approval → Completed / Failed / Stopped, per conversation.
-- **Memory** — optional `CONTEXT.md` (facts, decisions, progress) and `INSTRUCTIONS.md` (rules,
-  preferences) per conversation and per folder, stored in `<folder>/.cpm/`. A setup window asks before
-  anything is created. The agent refines these files as you work. The *Memory workspace* shows what will
-  be sent, its size in tokens, what changed since the last send (diff), lets you exclude files and pin
-  essential notes. Unchanged memory is not re-sent. Files from other folders/conversations can be linked.
-- **Search** (Ctrl+K) — across titles, every message of every conversation, and memory files, with folder
-  and date filters; a result opens the conversation at the matching message.
-- **Git** — status, selective commit, stage/unstage/discard, fetch, pull (ff-only or rebase), push,
-  branches, merge, rebase with continue/skip/abort, stash, tags, history/revert, and pull-request links for
-  GitHub, GitLab, Bitbucket Cloud, Bitbucket Server and Azure DevOps.
-- **Tools** — VS Code, MATLAB (chosen release, generated startup script, Agentic Toolkit setup),
-  Bitbucket, Jira (company MCP endpoint with OAuth/bearer, or a local connector with API token). Each has a
-  tickbox and a **Test** button that checks installation, sign-in and connectivity and suggests the fix.
-- **Models** — the agent's list plus your own entries, imported from TOML profiles (literal secrets are
-  removed and must go to *API keys*). Removing a model never deletes its file.
-- **API keys** — stored with Windows DPAPI / macOS Keychain / Linux Secret Service, passed to the agent as
-  environment variables, never written into TOML.
-- **Reliability** — drafts are saved on the server for every conversation; separate recovery messages for
-  "app connection lost", "agent stopped" (Reconnect) and "conversation open in another Codex window";
-  daily state backups with restore; diagnostic export with secrets and home path removed; update check.
-- English, Français, Español, Deutsch; light and dark themes.
+Settings from *Codex Projects Management* (earlier name) are imported automatically on first start.
+
+## 3. Everything in one place
+
+- **Explorer** — your folders as on disk (`D:` › `X1191` › `Distance focal`) with their conversations.
+  Click a folder to open its **project overview**: conversations, files with preview, shared memory, skills,
+  Git status and README, plus *New conversation*, VS Code, MATLAB and Explorer buttons.
+- **New conversation** — one window: choose the AI, give a title, and (optionally) a starting context and
+  instructions, saved as `CONTEXT.md` / `INSTRUCTIONS.md` and refined as you work.
+- **Chat** — streamed replies, commands with output, file diffs, approvals, model and reasoning effort beside
+  Send, quick-start prompts and your own saved prompts, attachments (button, drag & drop, paste).
+- **Memory workspace** — what will be sent, its size, what changed, pinned notes, linked files.
+- **Search (Ctrl+K)** — every message, title and memory file, with folder and date filters.
+- **Add-ons** — one-click: AI agents, OmniRoute (installs, starts and adds itself as a provider), Ollama,
+  connectors (Jira & Confluence, GitHub, Playwright browser, Context7 docs, memory, sequential thinking,
+  folder access) added to Codex and Claude Code together, and skill packs where you tick the skills you want.
+- **Git** — full panel (selective commit, branches, merge, rebase, stash, tags, history) and pull-request
+  links for GitHub, GitLab, Bitbucket Cloud/Server and Azure DevOps.
+- **Simple / Pro** — Simple shows only what is needed to chat; Pro adds Git, action modes and advanced memory.
+- **Reliability** — server-side drafts, clear recovery messages, backups with restore, redacted diagnostics,
+  integration tests with suggested fixes in every tool card. English, Français, Español, Deutsch; light/dark.
+- **Official tool icons** — *Configuration › Appearance › Download official icons* fetches each vendor's own
+  website icon onto your computer (they are not shipped with the app), or upload your own.
 
 ## 4. Development
 
 ```bash
-npm test          # 40 unit + API tests (uses a protocol-faithful fake Codex)
-npm run demo      # sandbox UI with sample data
+npm test          # 50 unit + API tests (protocol-faithful fake Codex, stub API providers)
+npm run demo      # sandbox UI with sample data and simulated providers
 node server.mjs   # server only; prints the URL with its session token
 ```
 
-Project layout:
-
 ```
-server.mjs            HTTP server, security checks, routes
-lib/app.mjs           application core (conversations, folders, memory, tools, models)
-lib/agents/codex.mjs  Codex adapter — codex app-server JSON-RPC (verified on codex-cli 0.166.0)
-lib/agents/claude.mjs Claude Code adapter — stream-json
-lib/memory.mjs        CONTEXT.md / INSTRUCTIONS.md, preview, snapshots, diff
-lib/search.mjs        full-text search      lib/checks.mjs   integration tests
-lib/git.mjs           Git operations        lib/support.mjs  backups, diagnostics, updates
-public/               interface (no build step)
-test/                 node:test suites and the fake Codex app-server
+server.mjs              HTTP server, security checks, routes, quit-on-close
+lib/app.mjs             application core
+lib/agents/codex.mjs    Codex — codex app-server JSON-RPC (verified on codex-cli 0.166.0)
+lib/agents/claude.mjs   Claude Code — stream-json
+lib/agents/api.mjs      API services — OpenAI-compatible, Anthropic and Gemini wire formats
+lib/providers.mjs       provider presets           lib/addons.mjs    one-click add-on catalog
+lib/memory.mjs          CONTEXT/INSTRUCTIONS        lib/search.mjs    full-text search
+lib/git.mjs  lib/tools.mjs  lib/checks.mjs  lib/support.mjs  lib/icons.mjs  lib/secrets.mjs
+public/                 interface (no build step)   test/            node:test suites and fakes
 ```
 
-Security model: the server listens on 127.0.0.1 only, rejects foreign `Host`/`Origin` headers, requires a
-random per-launch token on every API call, spawns processes with argument arrays (no shell), and never
-returns secret values.
+Security: listens on 127.0.0.1 only, rejects foreign Host/Origin, random per-launch token on every API call,
+processes spawned with argument arrays, secrets never returned by the API, downloaded SVG icons served sandboxed,
+project-file access limited to your project folders.
 
 ## 5. Known limits
 
-- A conversation can be written by only one Codex process at a time. Close it in any Codex terminal
-  before continuing it here (the app explains this when it happens).
-- Windows-specific code paths (DPAPI, `.vbs` launcher, Edge app window, MATLAB under `Program Files`) are
-  written for Windows but were validated only by review and on Linux equivalents; test them on your PC.
-- Claude Code runs one process per message in print mode, so its approvals follow the action mode rather
-  than interactive cards.
+- A Codex conversation can be written by one Codex process at a time; close it in any terminal first.
+- API services chat but do not run commands or edit files; use Codex or Claude Code for that.
+- Windows-specific paths (DPAPI, `.vbs`, Edge app window, MATLAB, `npm.cmd`) were reviewed but not run on
+  Windows here; real accounts (Jira, Bitbucket, paid models, OmniRoute) were not available for testing.
