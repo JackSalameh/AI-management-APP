@@ -1,0 +1,5 @@
+#!/usr/bin/env node
+// Fake local service: answers on the port given in FAKE_SVC_PORT after a short start-up.
+import http from 'node:http';
+console.log('starting fake service', process.argv.slice(2).join(' '));
+setTimeout(() => http.createServer((q, r) => { r.writeHead(401); r.end('{}'); }).listen(+process.env.FAKE_SVC_PORT, '127.0.0.1'), 800);

@@ -18,6 +18,21 @@
   together**, in two groups; each message goes through OmniRoute only when an OmniRoute model is chosen, otherwise
   to Anthropic with your Claude account (both can be used in the same conversation).
 
+- **OmniRoute did not start from the app**: it was launched without a log and given up on after 30 s (its
+  first start can take longer), with no reason shown. It now starts in the background with `--no-open`, the app
+  waits up to 2 minutes, stops waiting as soon as it exits, and shows the end of what it printed
+  (`%APPDATA%\AIManagementApp\logs\omniroute.log`). **OmniRoute starts with the app** whenever it is used
+  (provider added or Claude Code connected), and Configuration › Accounts › Claude Code shows whether it is
+  running, with a *Start OmniRoute* button. `scripts\start-omniroute-windows.cmd` starts it by hand and records
+  checks and output in `<folder above the app>\AppData\logs\`.
+
+- **“API Error: 400 Ambiguous model 'claude-opus-5-5'”**: when Claude Code goes through OmniRoute (the app's
+  switch, or `ANTHROPIC_BASE_URL` in Claude Code's own `settings.json`, which sends *every* Claude Code message
+  there) and OmniRoute has two connections serving Claude (`anthropic/…` API key, `cc/…` Claude subscription),
+  the bare model name was refused. The app now gives OmniRoute the full name from its model list, preferring
+  your subscription (`cc/`), then `anthropic/`; aliases (opus, sonnet, haiku) go to the newest model of that family.
+  Configuration › Accounts › Claude Code says when settings.json routes everything through OmniRoute.
+
 ### New
 - **Every Claude Code and Codex session on the computer is found and loaded.** The app searches Codex's folder
   (`%USERPROFILE%\.codex\sessions` and `archived_sessions`), Claude Code's folder (`%USERPROFILE%\.claude\projects`),

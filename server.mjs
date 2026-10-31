@@ -68,6 +68,7 @@ export async function createServer({ dataDir = defaultDataDir(), codexHome, port
     'POST /api/settings': (b) => app.updateSettings(b),
     'GET /api/claude/gateway': () => app.claudeGatewayInfo(),
     'POST /api/claude/gateway': (b) => app.setClaudeGateway(b),
+    'POST /api/omniroute/start': async () => { const r = await app.ensureOmniRoute({ force: true }); if (r.started) await app.refresh().catch(() => {}); return r; },
     'GET /api/sessions': () => app.sessionsInfo(),
     'POST /api/sessions': (b) => app.setSessionsOptions(b),
     'POST /api/sessions/scan': (b) => app.scanSessionsNow(b),

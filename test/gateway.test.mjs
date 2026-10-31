@@ -24,6 +24,7 @@ const seen = [];
 const omni = http.createServer((req, res) => {
   seen.push({ url: req.url, auth: req.headers.authorization });
   if (req.url === '/v1/models') {
+    if (req.headers.authorization === 'Bearer global_key') return res.end(JSON.stringify({ data: [{ id: 'anthropic/claude-opus-5-5' }, { id: 'cc/claude-opus-5-5' }, { id: 'cc/claude-sonnet-5-5' }] }));
     if (req.headers.authorization !== 'Bearer oma_test_key') { res.writeHead(401); return res.end(JSON.stringify({ error: { message: 'invalid key' } })); }
     return res.end(JSON.stringify({ data: [{ id: 'glm/glm-5.2' }, { id: 'kmc/kimi-k2.6' }] }));
   }
@@ -62,7 +63,8 @@ test('connect OmniRoute to Claude Code: switch, test, models, environment of eac
   assert.deepEqual(g.test, { ok: true, models: 2 });
   assert.equal(g.enabled, true);
   assert.deepEqual(g.models.sort(), ['glm/glm-5.2', 'kmc/kimi-k2.6']);
-  assert.equal(seen.at(-1).auth, 'Bearer oma_test_key');
+  assert.ok(seen.some((r) => r.auth === 'Bearer oma_test_key'), 'key sent as Bearer');
+  assert.equal(g.running, true, 'OmniRoute seen as running');
 
   // Claude's own models and OmniRoute's are offered together, in two groups; the key never appears in the state file.
   const st = await api('/api/state');
@@ -102,4 +104,23 @@ test('connect OmniRoute to Claude Code: switch, test, models, environment of eac
   await waitFor((e) => e.type === 'turn.completed' && e.key === n.key);
   const reply2 = events.find((e) => e.type === 'item.completed' && e.key === n.key && e.item.kind === 'agent').item.text;
   assert.ok(!reply2.includes(OMNI) && reply2.includes('TOKEN=- MODEL=- ') && reply2.includes('DISCOVERY=-'), reply2);
+});
+
+test('bug: "Ambiguous model claude-opus-5-5" — OmniRoute set in Claude Code\u2019s own settings.json gets the full model name', async () => {
+  fs.mkdirSync(process.env.CLAUDE_CONFIG_DIR, { recursive: true });
+  fs.writeFileSync(path.join(process.env.CLAUDE_CONFIG_DIR, 'settings.json'), JSON.stringify({ model: 'opus', env: { ANTHROPIC_BASE_URL: OMNI, ANTHROPIC_AUTH_TOKEN: 'global_key' } }));
+  const info = await api('/api/claude/gateway');
+  assert.equal(info.global, OMNI, 'shown in Configuration');
+  const n = await api('/api/conversation/new', { agent: 'claude', folder: path.join(work, 'Global'), modelKey: 'claude:claude-opus-5-5' });
+  events = [];
+  await api('/api/conversation/send', { key: n.key, text: 'next steps', modelKey: 'claude:claude-opus-5-5', effort: 'medium' });
+  await waitFor((e) => e.type === 'turn.completed' && e.key === n.key);
+  const reply = events.find((e) => e.type === 'item.completed' && e.key === n.key && e.item.kind === 'agent').item.text;
+  assert.match(reply, /ARG=cc\/claude-opus-5-5 /, 'subscription connection (cc/) preferred over anthropic/');
+  // An alias is mapped to the newest model of that family.
+  events = [];
+  await api('/api/conversation/send', { key: n.key, text: 'again', modelKey: 'claude:sonnet' });
+  await waitFor((e) => e.type === 'turn.completed' && e.key === n.key);
+  assert.match(events.find((e) => e.type === 'item.completed' && e.key === n.key && e.item.kind === 'agent').item.text, /ARG=cc\/claude-sonnet-5-5 /);
+  fs.rmSync(path.join(process.env.CLAUDE_CONFIG_DIR, 'settings.json'));
 });

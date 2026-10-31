@@ -1253,7 +1253,13 @@ function gatewayBox(onChange) {
     const save = async (enabled) => {
       try { const r = await api('/api/claude/gateway', { enabled, provider: prov.value, model: model.value }); draw(r, r.test); onChange?.(); loadState(false); } catch (e) { fail(e); }
     };
+    const startBtn = h('button', { class: 'btn small primary', onclick: async () => {
+      startBtn.disabled = true; startBtn.textContent = t('omniStarting');
+      try { const r = await api('/api/omniroute/start', {}); if (!r.running) toast(`${r.error || 'OmniRoute'} — ${t('omniSeeLog')}`, true); api('/api/claude/gateway').then((x) => draw(x)); loadState(false); } catch (e) { fail(e); startBtn.disabled = false; }
+    } }, t('omniStart'));
     box.replaceChildren(
+      h('div', { class: 'acct-line help' }, h('span', { class: `dot ${g.running ? 'ready' : 'error'}` }), ' ', g.running ? t('omniRunning') : t('omniStopped'), g.running ? null : startBtn),
+      g.global ? h('div', { class: 'banner info' }, h('span', { html: icon('info') }), h('span', {}, t('gwGlobal', { url: g.global }))) : null,
       h('label', { class: 'check' }, h('input', { type: 'checkbox', checked: g.enabled, onchange: (e) => save(e.target.checked) }), h('span', {}, t('gwUse'))),
       h('div', { class: 'help' }, t('gwHelp')),
       field(t('gwProvider'), prov), field(t('gwModel'), h('div', {}, model, dl), t('gwModelHelp')),
