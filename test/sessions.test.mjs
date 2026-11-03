@@ -61,6 +61,8 @@ before(async () => {
   base = `http://127.0.0.1:${srv.port}`;
   srv.app.on('event', (e) => events.push(e));
   for (let i = 0; i < 100 && srv.app.agents.codex.state !== 'ready'; i++) await new Promise((r) => setTimeout(r, 30));
+  // The start-up search for sessions runs after Codex is ready: wait for it so each test sees a settled state.
+  for (let i = 0; i < 300 && !srv.app.lastFullRefresh; i++) await new Promise((r) => setTimeout(r, 30));
 });
 after(async () => { await srv.shutdown(0); });
 

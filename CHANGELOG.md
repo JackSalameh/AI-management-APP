@@ -33,6 +33,20 @@
   your subscription (`cc/`), then `anthropic/`; aliases (opus, sonnet, haiku) go to the newest model of that family.
   Configuration › Accounts › Claude Code says when settings.json routes everything through OmniRoute.
 
+- **Jira and Bitbucket through the official Atlassian MCP** (carried over from Codex Projects Management 1.9.5,
+  where it was checked with a real Windows Codex and Atlassian OAuth): one endpoint for both products,
+  `https://mcp.atlassian.com/v2/mcp?tools=all` (was `v1/mcp/authv2` for sign-in, `v2/mcp` for tokens).
+  - **Browser sign-in works for Bitbucket too.** The app used to require an API token for it.
+  - **Each product gets an explicit tool list**: *Consultation only*, or *Consultation and changes*.
+  - **Bitbucket includes the code tools** (`searchCode`, `getCodeFile`, `listCodeDirectory`, `scanCodeRepo`,
+    `getCodeSymbol`, `diffCodeSymbols`).
+  - **The Jira site and Bitbucket workspace are told to the AI**, once per conversation (and again if they change),
+    shown as collapsed context.
+  - **Bitbucket search rules are sent with them**: stay remote and scoped to the named repositories, never clone or
+    bulk-download automatically, report what was not covered.
+- **Reconnect (carried over from 1.9.6)**: launching the app again while it runs with Codex stopped or failed now
+  restarts Codex first, instead of opening a window on a stopped agent. A busy instance is left untouched.
+
 ### New
 - **Every Claude Code and Codex session on the computer is found and loaded.** The app searches Codex's folder
   (`%USERPROFILE%\.codex\sessions` and `archived_sessions`), Claude Code's folder (`%USERPROFILE%\.claude\projects`),

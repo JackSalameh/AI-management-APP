@@ -2322,8 +2322,11 @@ function mcpStatusLine(name, label) {
 function atlassianBox(purpose, T) {
   const cfg = T[purpose];
   const name = purpose === 'bitbucket' ? 'atlassian-bitbucket' : (T.jira.serverName || 'atlassian');
-  const modes = purpose === 'bitbucket' ? [['token', t('atlToken')], ['service', t('atlService')]] : [['oauth', t('atlOauth')], ['token', t('atlToken')], ['service', t('atlService')]];
-  const mode = select(modes, cfg.mcpMode || modes[0][0], () => sync());
+  // Browser sign-in works for both products on the official v2 endpoint; tokens stay available.
+  const modes = [['oauth', t('atlOauth')], ['token', t('atlToken')], ['service', t('atlService')]];
+  const mode = select(modes, cfg.mcpMode || 'oauth', () => sync());
+  const access = select([['read', t('atlRead')], ['write', t('atlWrite')]], cfg.mcpAccess || 'read', () => {});
+  const target = h('input', { class: 'input', spellcheck: 'false', value: purpose === 'bitbucket' ? (cfg.workspace || '') : (T.jira.site || ''), placeholder: purpose === 'bitbucket' ? 'https://bitbucket.org/team' : 'https://company.atlassian.net' });
   const email = h('input', { class: 'input', value: cfg.email || '', placeholder: 'you@company.com', spellcheck: 'false' });
   const token = h('input', { class: 'input', type: 'password', autocomplete: 'new-password', placeholder: cfg.mcpMode && cfg.mcpMode !== 'oauth' ? '•••••• (' + t('keySaved') + ')' : '' });
   const emailF = field(t('email'), email), tokenF = field(t('atlTokenLabel'), token);
@@ -2333,11 +2336,15 @@ function atlassianBox(purpose, T) {
   sync();
   return h('div', { class: 'mcp-box' }, h('div', { class: 'gp-section' }, t('mcpConnection')),
     h('p', { class: 'help' }, purpose === 'bitbucket' ? t('bbMcpHelp') : t('jiraMcpHelp')),
+    field(purpose === 'bitbucket' ? t('atlWorkspace') : t('atlSite'), target, purpose === 'bitbucket' ? t('atlWorkspaceHelp') : t('atlSiteHelp')),
+    field(t('atlAccess'), access, t('atlAccessHelp')),
     field(t('atlAuth'), mode), emailF, tokenF,
     h('div', { class: 'inline' }, h('button', { class: 'btn primary small', onclick: async (e) => {
       const btn = e.currentTarget; btn.disabled = true; notes.textContent = '…';
-      try { const r = await api('/api/atlassian/connect', { purpose, mode: mode.value, email: email.value.trim(), token: token.value.trim() || undefined }); token.value = ''; notes.textContent = r.notes.join(' · '); status.draw(r.connection); S.sum.tools = (await api('/api/state')).tools; renderTop(); }
-      catch (err) { notes.textContent = err.message; }
+      try {
+        const r = await api('/api/atlassian/connect', { purpose, mode: mode.value, access: access.value, email: email.value.trim(), token: token.value.trim() || undefined, ...(target.value.trim() ? { [purpose === 'bitbucket' ? 'workspace' : 'site']: target.value.trim() } : {}) });
+        token.value = ''; notes.textContent = r.notes.join(' · '); status.draw(r.connection); S.sum.tools = (await api('/api/state')).tools; renderTop();
+      } catch (err) { notes.textContent = err.message; }
       btn.disabled = false;
     } }, t('connect')),
       h('a', { class: 'help', href: 'https://id.atlassian.com/manage-profile/security/api-tokens', target: '_blank', rel: 'noopener noreferrer' }, `${t('getKey')} ↗`)),

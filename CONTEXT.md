@@ -78,17 +78,22 @@ A local desktop web app that replaces the Codex command window: projects as an E
 - Token model (lib/usage.mjs): { input (uncached), output, cacheRead, cacheWrite, reasoning }; Codex totals are the thread's running total, Claude/API totals are summed per turn and kept in the conversation record.
 - Trail-Code 0.28.0: `trail init --yes <dir>` non-interactive; native tree-sitter build may need build tools.
 
-## Progress
-- 2026-10-30: 3.4.0 — 79 automated tests, 57 browser flows (8 suites).
-- 2026-10-30: 3.3.0 — 73 automated tests, 54 browser flows (7 suites), Spec Kit init verified with the real CLI.
-- 2026-10-30: 3.2.0 — 62 automated tests, 42 browser flows (5 suites), real codex-cli check of the MathWorks MCP entry.
-- 2026-10-30: 3.1.0 — 55 automated tests, 36 browser flows (4 suites), Claude detection checked on a real install.
-- 2026-10-30: 3.0.0 — 50 automated tests, 32 browser flows (3 suites), real codex-cli 0.166.0 smoke test.
-- 2026-10-30: rebuild completed as 2.0.0 in a cloud workspace (not deployed). Validation: 40 automated tests, 23 browser flows, smoke test against real codex-cli 0.166.0 (no account), Claude adapter read of a real session. Not verified: Windows-only paths (DPAPI, .vbs, Edge app window, MATLAB launch), real Jira/Bitbucket accounts, paid model replies. See CHANGELOG.md.
-
 ## Decisions added in 3.5 (sessions)
 - Sessions are searched in: `<CODEX_HOME>/sessions` + `archived_sessions`, `<CLAUDE_CONFIG_DIR or ~/.claude>/projects`, the Claude desktop app's data folder (`%APPDATA%\Claude`, `~/Library/Application Support/Claude`, `$XDG_CONFIG_HOME/Claude`), the sessions folder and folders/drives the user adds. Recognised by content: Codex `rollout-*.jsonl` whose first record is `session_meta`; Claude Code `<uuid>.jsonl` with `sessionId`. Limits: depth 12, 50 000 folders, 30 s; caches, `node_modules`, system folders skipped.
 - Import = copy, never move: Codex and Claude Code need their own file to continue a conversation. codex-cli 0.166 lists, reads and resumes a rollout copied into `sessions/YYYY/MM/DD/` (verified with the real binary, also while the app-server runs; `thread/resume.path` exists but is experimental, so not used). Claude Code: `projects/<cwd with [^a-zA-Z0-9] → '-'>/<id>.jsonl`; the app moves the file there before `--resume` when the folder changed.
 - Session folder = `<sessionsRoot>/<conversation title>/` with `session.json` {agent, id, title, cwd, sessionFile}, a mirrored copy of the session file, `TRANSCRIPT.md`, and CONTEXT.md / INSTRUCTIONS.md (created there when the user accepts). `session.json` is how a folder is linked back to its conversation (also hand-made folders); its `cwd` is used when the recorded folder does not exist on this computer.
 - Development of the app itself: the session folder is `D:\Claude\AImanagementAPPDevelopment`, next to `D:\Claude\AI Management APP`.
 
+## Decisions added after 3.5 (carried over from Codex Projects Management 1.9.5–1.9.6, a parallel line maintained in Codex)
+- Atlassian MCP: one endpoint `https://mcp.atlassian.com/v2/mcp?tools=all` for Jira and Bitbucket, OAuth or token; OAuth works for Bitbucket (verified there on the owner's Windows Codex). Per-product `enabled_tools` (consultation / changes) from lib/atlassianmcp.mjs; Bitbucket code tools; Jira site + Bitbucket workspace sent once per conversation with remote-search rules (no automatic clone).
+- Second launch: if Codex is stopped/failed in the running instance and nothing runs, it is restarted (server.mjs reuseRunning).
+- OmniRoute through Claude Code: gateway model ids are prefixed (cc/ preferred, then anthropic/); ANTHROPIC_BASE_URL in ~/.claude/settings.json routes every Claude Code turn.
+
+## Progress
+- 2026-10-30: 3.5.0 — 84 automated tests, browser check of the Sessions screens; Codex import verified with the real codex-cli 0.166 binary.
+- 2026-10-30: 3.4.0 — 79 automated tests, 57 browser flows (8 suites).
+- 2026-10-30: 3.3.0 — 73 automated tests, 54 browser flows (7 suites), Spec Kit init verified with the real CLI.
+- 2026-10-30: 3.2.0 — 62 automated tests, 42 browser flows (5 suites), real codex-cli check of the MathWorks MCP entry.
+- 2026-10-30: 3.1.0 — 55 automated tests, 36 browser flows (4 suites), Claude detection checked on a real install.
+- 2026-10-30: 3.0.0 — 50 automated tests, 32 browser flows (3 suites), real codex-cli 0.166.0 smoke test.
+- 2026-10-30: rebuild completed as 2.0.0 in a cloud workspace (not deployed). Validation: 40 automated tests, 23 browser flows, smoke test against real codex-cli 0.166.0 (no account), Claude adapter read of a real session. Not verified: Windows-only paths (DPAPI, .vbs, Edge app window, MATLAB launch), real Jira/Bitbucket accounts, paid model replies. See CHANGELOG.md.

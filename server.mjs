@@ -27,7 +27,7 @@ export async function createServer({ dataDir = defaultDataDir(), codexHome, port
   const allowedHosts = () => new Set([`127.0.0.1:${actualPort}`, `localhost:${actualPort}`]);
 
   const routes = {
-    'GET /api/health': () => ({ ok: true, name: BRAND.name, version: BRAND.version, agents: Object.fromEntries(Object.entries(app.agents).map(([k, a]) => [k, a.status().state])) }),
+    'GET /api/health': () => ({ ok: true, name: BRAND.name, version: BRAND.version, agents: Object.fromEntries(Object.entries(app.agents).map(([k, a]) => [k, a.status().state])), busy: Object.values(app.agents).some((a) => a.activeTurns?.size > 0) }),
     'GET /api/state': () => app.summary(),
     'POST /api/refresh': (b) => app.refresh({ full: b.full !== false }),
     'GET /api/conversation': (q) => app.openConversation(q.key, { limit: q.limit }),
@@ -280,6 +280,25 @@ export async function openUi(url, mode = 'app') {
   await openExternal(url);
 }
 
+/**
+ * Launching again while the app runs reuses it. If Codex is stopped or failed in it (after Stop agent, a crash or
+ * sleep) and nothing is running, Codex is restarted first, so the window opens ready instead of on a stopped agent
+ * (transposed from Codex Projects Management 1.9.6, "correction bug reconnexion"). Returns null when no instance.
+ */
+export async function reuseRunning(dataDir) {
+  let lock; try { lock = JSON.parse(fs.readFileSync(path.join(dataDir, 'instance.json'), 'utf8')); } catch { return null; }
+  const base = `http://127.0.0.1:${lock.port}`, headers = { 'x-cpm-token': lock.token };
+  const r = await fetch(`${base}/api/health`, { headers, signal: AbortSignal.timeout(1500) }).catch(() => null);
+  if (!r?.ok) return null;
+  const health = await r.json().catch(() => ({}));
+  let restarted = false;
+  if (['stopped', 'error'].includes(health.agents?.codex) && !health.busy) {
+    const rr = await fetch(`${base}/api/agent/restart`, { method: 'POST', headers: { ...headers, 'content-type': 'application/json' }, body: '{"agent":"codex"}', signal: AbortSignal.timeout(60_000) }).catch(() => null);
+    restarted = !!rr?.ok;
+  }
+  return { url: `${base}/#t=${lock.token}`, restarted, health };
+}
+
 // ---------------------------------------------------------------- CLI entry
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const args = process.argv.slice(2);
@@ -291,16 +310,12 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
   const major = +process.versions.node.split('.')[0];
   if (major < 22) { console.error(`${BRAND.name} needs Node.js 22 or newer (found ${process.version}).`); process.exit(1); }
   // Single instance per OS user: reuse the running server and just open a window.
-  try {
-    const lock = JSON.parse(fs.readFileSync(path.join(dataDir, 'instance.json'), 'utf8'));
-    const r = await fetch(`http://127.0.0.1:${lock.port}/api/health`, { headers: { 'x-cpm-token': lock.token }, signal: AbortSignal.timeout(1500) });
-    if (r.ok) {
-      const url = `http://127.0.0.1:${lock.port}/#t=${lock.token}`;
-      console.log(`${BRAND.name} is already running: ${url}`);
-      if (args.includes('--open')) await openUi(url);
-      process.exit(0);
-    }
-  } catch { /* not running */ }
+  const running = await reuseRunning(dataDir).catch(() => null);
+  if (running) {
+    console.log(`${BRAND.name} is already running: ${running.url}${running.restarted ? ' (Codex was stopped: restarted)' : ''}`);
+    if (args.includes('--open')) await openUi(running.url);
+    process.exit(0);
+  }
   // A stable per-user port keeps the browser origin constant across restarts (window size, theme cache);
   // if it is taken (e.g. by another user's instance), a free port is used instead.
   const wanted = portArg >= 0 ? +args[portArg + 1] : +(process.env.CPM_PORT || stablePort());

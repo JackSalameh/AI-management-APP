@@ -295,19 +295,19 @@ test('official icon download prefers the page icon (SVG) and saves it locally', 
 
 
 test('Atlassian MCP: Jira OAuth, Bitbucket API token kept in the keychain, live status', async () => {
-  const bad = await api('/api/atlassian/connect', { purpose: 'bitbucket', mode: 'oauth' });
-  assert.equal(bad.status, 400);
+  // Since 3.5 (correction from Codex Projects Management 1.9.5): browser sign-in works for Bitbucket too (v2 endpoint).
+  assert.equal((await api('/api/atlassian/connect', { purpose: 'bitbucket', mode: 'oauth' })).status, 200);
   const bb = await api('/api/atlassian/connect', { purpose: 'bitbucket', mode: 'token', email: 'jack@example.com', token: 'ATATT-secret-123' });
   assert.equal(bb.status, 200, bb.error);
   const cfg = fake().config.mcp_servers['atlassian-bitbucket'];
-  assert.equal(cfg.url, 'https://mcp.atlassian.com/v2/mcp');
+  assert.equal(cfg.url, 'https://mcp.atlassian.com/v2/mcp?tools=all');
   assert.deepEqual(cfg.env_http_headers, { Authorization: 'ATLASSIAN_ATLASSIAN_BITBUCKET_AUTH' });
   assert.ok(!JSON.stringify(fake().config).includes('ATATT'), 'token not in config');
   assert.equal(srv.app.agents.codex.extraEnv.ATLASSIAN_ATLASSIAN_BITBUCKET_AUTH, `Basic ${Buffer.from('jack@example.com:ATATT-secret-123').toString('base64')}`);
   assert.equal(bb.connection.state, 'connected');
   const j = await api('/api/atlassian/connect', { purpose: 'jira', mode: 'oauth' });
   assert.equal(j.status, 200, j.error);
-  assert.equal(fake().config.mcp_servers.atlassian.url, 'https://mcp.atlassian.com/v1/mcp/authv2');
+  assert.equal(fake().config.mcp_servers.atlassian.url, 'https://mcp.atlassian.com/v2/mcp?tools=all');
   const st = await api('/api/mcp/connection?name=atlassian');
   assert.equal(st.ok, true);
 });
